@@ -150,3 +150,10 @@ export interface DbError {
 export const CONFIRM_CODE = 'BERTH_CONFIRM_PROD';
 export const CONFIRM_ENV_DELETE = 'BERTH_CONFIRM_ENV_DELETE';
 export const NO_WRITE = 'BERTH_NO_WRITE';
+
+/** A newer release found by `check_update`. Notes are plain text, never rendered as HTML. */
+export interface UpdateInfo { currentVersion: string; version: string; date?: string; notes?: string }
+export type UpdateProgress =
+  | { event: 'started'; total: number | null }
+  | { event: 'chunk'; downloaded: number }
+  | { event: 'installed' };

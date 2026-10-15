@@ -7,6 +7,7 @@ import { HighlightStyle, syntaxHighlighting } from '@codemirror/language';
 import { tags as t } from '@lezer/highlight';
 import { api } from './api';
 import { Grid } from './Grid';
+import { Placeholder, Spinner } from './Status';
 import { Icon } from './Icons';
 import { lineCol, newRunId } from './logic';
 import { ConfirmDialog } from './ConfirmDialog';
@@ -113,7 +114,7 @@ export function QueryView({ conn, env, envLabel, hasRead, hasWrite, envControl, 
     <div className="pane">
       <div className="toolbar">
         {running
-          ? <button className="btn danger" onClick={() => api.cancelQuery(running)}><Icon name="stop" />Cancel</button>
+          ? <button className="btn danger" onClick={() => api.cancelQuery(running)}><Spinner />Cancel</button>
           : <button className="btn primary" onClick={run}><Icon name="play" />Run<kbd>⌘↵</kbd></button>}
         <span className="grow" />
         {envControl}
@@ -129,7 +130,7 @@ export function QueryView({ conn, env, envLabel, hasRead, hasWrite, envControl, 
         </label>
       </div>
       <div className="editor" ref={host} />
-      <div className="results">
+      <div className={`results${running && set ? ' stale' : ''}`} aria-busy={!!running}>
         <div className="rtabs" role="tablist">
           {result?.results.map((s, i) => (
             <button key={i} role="tab" aria-selected={i === active} onClick={() => setActive(i)}>
@@ -139,6 +140,7 @@ export function QueryView({ conn, env, envLabel, hasRead, hasWrite, envControl, 
           <span style={{ flex: 1 }} />
           {result && <span className={`chip ${result.role}`} title={result.reason}>ran on {result.role} · {result.host} · {result.elapsedMs} ms</span>}
         </div>
+        {running && set && <div className="note running"><Spinner />Running… the results below are from the previous run.</div>}
         {result?.warn && <div className="note">{result.warn}</div>}
         {error ? (
           <div className="msg error">
@@ -149,10 +151,12 @@ export function QueryView({ conn, env, envLabel, hasRead, hasWrite, envControl, 
             {error.e.code === NO_WRITE && <pre>Add a primary to this profile in Edit profiles to allow writes.</pre>}
           </div>
         ) : set ? (
-          set.columns.length
-            ? <>{set.truncated && <div className="note">Showing the first {set.rows.length.toLocaleString()} rows.</div>}<Grid columns={set.columns} rows={set.rows} /></>
-            : <div className="msg">{set.affected ?? 0} row{set.affected === 1 ? '' : 's'} affected.</div>
-        ) : <div className="msg faint">{running ? 'Running…' : 'Run a query to see results here.'}</div>}
+          !set.columns.length
+            ? <Placeholder title={`${set.affected ?? 0} row${set.affected === 1 ? '' : 's'} affected`}>The statement ran and returned no result set.</Placeholder>
+            : !set.rows.length ? <Placeholder title="No rows">The query ran and returned no rows.</Placeholder>
+            : <>{set.truncated && <div className="note">Showing the first {set.rows.length.toLocaleString()} rows.</div>}<Grid columns={set.columns} rows={set.rows} /></>
+        ) : running ? <Placeholder loading title="Running…">Cancel stops it on the server.</Placeholder>
+        : <Placeholder title="No results yet">Run a query with ⌘↵ to see its results here.</Placeholder>}
       </div>
       {confirm && (
         <ConfirmDialog connection={conn} environment={envLabel} what="This statement changes data" onCancel={() => setConfirm(null)}

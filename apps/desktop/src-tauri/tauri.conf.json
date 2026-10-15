@@ -46,5 +46,12 @@
     "copyright": "Copyright 2026 The Berth Studio Authors",
     "icon": ["icons/32x32.png", "icons/128x128.png", "icons/128x128@2x.png", "icons/icon.icns", "icons/icon.ico"],
     "macOS": { "minimumSystemVersion": "12.0" }
+  },
+  "plugins": {
+    "updater": {
+      "endpoints": ["https://github.com/haryosmd/berth-studio/releases/latest/download/latest.json"],
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDk4NDhFNDA4MzlFQkQ1NTEKUldSUjFlczVDT1JJbUE4V0NZTlNQLzZFNm13VkJOcmwwWnZkME0xRXhDanBuVldzanVKWS8xYlcK",
+      "requireSignedVersion": true
+    }
   }
 }

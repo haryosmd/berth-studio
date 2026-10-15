@@ -215,3 +215,9 @@ export function lineCol(sql: string, position: number): { line: number; col: num
   const before = sql.slice(0, Math.max(0, position - 1)).split('\n');
   return { line: before.length, col: before[before.length - 1].length + 1 };
 }
+
+/** Download sizes for the update progress: "840 KB", "12.4 MB". */
+export function formatBytes(n: number): string {
+  if (n < 1024 * 1024) return `${Math.max(0, Math.round(n / 1024))} KB`;
+  return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+}

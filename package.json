@@ -7,7 +7,7 @@
   "engines": { "node": ">=20" },
   "workspaces": ["apps/desktop"],
   "scripts": {
-    "test": "node --test \"design/tests/*.test.mjs\" \"apps/desktop/tests/*.test.mjs\"",
+    "test": "node --test \"design/tests/*.test.mjs\" \"apps/desktop/tests/*.test.mjs\" \"scripts/tests/*.test.mjs\"",
     "typecheck": "npm run typecheck --workspace=@berth-studio/desktop",
     "build": "npm run build --workspace=@berth-studio/desktop",
     "tauri": "npm run tauri --workspace=@berth-studio/desktop --"

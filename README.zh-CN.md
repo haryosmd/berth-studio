@@ -44,6 +44,7 @@ Berth Studio 把这些都放进一个窗口里，而且对生产环境格外谨�
   - 表格里的每次修改，执行前都会先显示 SQL。
   - 要写入生产环境，必须先手动输入连接名。
 - **密钥：** 密码和令牌保存在系统钥匙串里，绝不会写进工作区文件，也不会显示在界面上。
+- **更新：** 发布新版本后，右上角会出现一个图标。点一下即可下载，只有签名校验通过，应用才会安装。
 
 ## 上手试试
 
@@ -94,6 +95,7 @@ npm test
 | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | 应用的构建方式及原因，英文 |
 | [`docs/ROADMAP.md`](docs/ROADMAP.md) | 已完成的部分和接下来的计划，英文 |
 | [`docs/SECURITY.md`](docs/SECURITY.md) | 威胁模型和全部安全措施，英文 |
+| [`docs/RELEASING.md`](docs/RELEASING.md) | 发布流程和应用内更新的工作方式，包括签名密钥及其密码，英文 |
 
 ## 安全
 

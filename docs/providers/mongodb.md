@@ -73,7 +73,7 @@ Install the server with Homebrew:
 brew tap mongodb/brew && brew install mongodb/brew/mongodb-community@8.0
 ```
 
-Current Homebrew loads formulae from a third-party tap only once you trust them. The install loads three: `mongodb-community@8.0`, its dependency `mongodb-database-tools`, and `mongodb-enterprise`, which is only read to check for a conflict and is not installed. Review them and run `brew trust --formula mongodb/brew/<formula>` for each yourself.
+Current Homebrew loads formulae from a third-party tap only once you trust them. The install reads `mongodb-community@8.0`, its dependency `mongodb-database-tools`, and the formulae it conflicts with (such as `mongodb-enterprise`, which is not installed). Trust each one Homebrew names with `brew trust --formula mongodb/brew/<formula>`, or the whole tap with `brew trust mongodb/brew`. CI trusts the whole tap, because the set of conflicting formulae changes between Homebrew versions.
 
 ## Sources
 

@@ -17,6 +17,9 @@ const COMMANDS: &[&str] = &[
     "aggregate",
     "list_indexes",
     "write_document",
+    "check_update",
+    "install_update",
+    "restart_app",
 ];
 
 fn main() {

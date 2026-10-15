@@ -6,6 +6,7 @@ import { api } from './api';
 import { ConfirmDialog } from './ConfirmDialog';
 import { Grid } from './Grid';
 import { Icon } from './Icons';
+import { Placeholder, Spinner } from './Status';
 import { documentsToGrid, idText } from './logic';
 import { CONFIRM_CODE, NO_WRITE, type DbError, type DocumentWrite, type Documents, type EnvId, type Json } from './types';
 import type { Status } from './App';
@@ -43,6 +44,7 @@ export function CollectionView({ conn, env, envLabel, db, collection, readOnly, 
   const [result, setResult] = useState<Documents | null>(null);
   const [error, setError] = useState<DbError | null>(null);
   const [busy, setBusy] = useState(false);
+  const [writing, setWriting] = useState(false);
   const [selected, setSelected] = useState<number | null>(null);
   const [editor, setEditor] = useState<{ kind: 'insert' | 'replace'; text: string } | null>(null);
   const [pipeline, setPipeline] = useState(START_PIPELINE);
@@ -66,7 +68,10 @@ export function CollectionView({ conn, env, envLabel, db, collection, readOnly, 
   useEffect(() => { setSkip(0); setNotice(null); }, [conn, env, db, collection]);
   useEffect(() => {
     if (mode === 'documents') find(0);
-    if (mode === 'indexes') api.listIndexes(conn, env, db, collection).then(setIndexes).catch((e: DbError) => setError(e));
+    if (mode === 'indexes') {
+      setIndexes(null);
+      api.listIndexes(conn, env, db, collection).then(setIndexes).catch((e: DbError) => { setError(e); setIndexes([]); });
+    }
   }, [conn, env, db, collection, mode]);
 
   const aggregate = async (confirm: string | null) => {
@@ -82,7 +87,7 @@ export function CollectionView({ conn, env, envLabel, db, collection, readOnly, 
   };
 
   const write = async (change: DocumentWrite, what: string, confirm: string | null = null) => {
-    setBusy(true); setError(null);
+    setBusy(true); setWriting(true); setError(null);
     try {
       const r = await api.writeDocument(conn, env, db, collection, change, confirm);
       setNotice(r.message); setEditor(null);
@@ -91,7 +96,7 @@ export function CollectionView({ conn, env, envLabel, db, collection, readOnly, 
       const err = e as DbError;
       if (err.code === CONFIRM_CODE) setPending({ what, run: c => write(change, what, c) });
       else setError(err);
-    } finally { setBusy(false); }
+    } finally { setBusy(false); setWriting(false); }
   };
 
   const grid = useMemo(() => documentsToGrid(result?.documents ?? []), [result]);
@@ -121,7 +126,7 @@ export function CollectionView({ conn, env, envLabel, db, collection, readOnly, 
           <label className="field"><span>Limit</span>
             <select className="input" value={limit} onChange={e => setLimit(Number(e.target.value))}>{LIMITS.map(n => <option key={n} value={n}>{n}</option>)}</select>
           </label>
-          <button className="btn primary" type="submit" disabled={busy}><Icon name="play" />Find</button>
+          <button className="btn primary" type="submit" disabled={busy}>{busy && !writing ? <Spinner /> : <Icon name="play" />}Find</button>
           {canWrite && <button className="btn" type="button" onClick={() => setEditor({ kind: 'insert', text: '{\n  \n}' })}><Icon name="plus" />Insert</button>}
         </form>
       )}
@@ -130,7 +135,7 @@ export function CollectionView({ conn, env, envLabel, db, collection, readOnly, 
         <div className="pipeline">
           <textarea className="input mono" spellCheck={false} value={pipeline} onChange={e => setPipeline(e.target.value)} aria-label="Aggregation pipeline" />
           <div className="pipeline-actions">
-            <button className="btn primary" disabled={busy} onClick={() => aggregate(null)}><Icon name="play" />Run pipeline</button>
+            <button className="btn primary" disabled={busy} onClick={() => aggregate(null)}>{busy ? <Spinner /> : <Icon name="play" />}Run pipeline</button>
             <span className="faint">A JSON array of stages. Pipelines with $out or $merge write, so they follow the same rules as edits.</span>
           </div>
         </div>
@@ -146,14 +151,26 @@ export function CollectionView({ conn, env, envLabel, db, collection, readOnly, 
       )}
 
       {mode === 'indexes' ? (
-        <div className="msg">
+        indexes === null ? <Placeholder loading title="Loading indexes…" />
+        : !indexes.length ? <Placeholder title="No indexes">{error ? 'The indexes could not be read.' : 'Views have no indexes of their own.'}</Placeholder>
+        : <div className="msg">
           <table className="plain">
             <thead><tr><th>Name</th><th>Keys</th><th>Unique</th></tr></thead>
             <tbody>{(indexes ?? []).map(i => <tr key={i.name}><td className="mono">{i.name}</td><td className="mono">{JSON.stringify(i.keys)}</td><td>{i.unique ? 'yes' : ''}</td></tr>)}</tbody>
           </table>
         </div>
-      ) : result && (
-        <div className="split">
+      ) : !result ? (
+        error ? null
+        : busy ? <Placeholder loading title={mode === 'aggregate' ? 'Running the pipeline…' : `Loading ${collection}…`} />
+        : mode === 'aggregate' ? <Placeholder title="No results yet">Write a pipeline above and run it.</Placeholder>
+        : null
+      ) : !result.documents.length ? (
+        mode === 'aggregate' ? <Placeholder title="No documents">The pipeline ran and returned nothing.</Placeholder>
+        : skip > 0 ? <Placeholder title="No more documents">Go back with Previous.</Placeholder>
+        : filter.trim() ? <Placeholder title="No documents match this filter">Change the filter, or clear it to see every document.</Placeholder>
+        : <Placeholder title={`${collection} is empty`}>{canWrite ? 'Insert a document to start.' : 'The collection has no documents yet.'}</Placeholder>
+      ) : (
+        <div className={`split${busy && !writing ? ' stale' : ''}`} aria-busy={busy}>
           <div className="split-main">
             <div className="rtabs">
               <span className="faint">{result.documents.length} documents{result.truncated ? ', more available' : ''} · {result.elapsedMs} ms</span>
@@ -175,7 +192,7 @@ export function CollectionView({ conn, env, envLabel, db, collection, readOnly, 
                     <button className="btn" onClick={() => setEditor(null)}>Cancel</button>
                     <button className="btn primary" disabled={busy} onClick={() => editor.kind === 'insert'
                       ? write({ action: 'insert', document: editor.text }, 'This inserts a document')
-                      : doc && write({ action: 'replace', id: idText(doc), document: editor.text }, 'This replaces a document')}>Save</button>
+                      : doc && write({ action: 'replace', id: idText(doc), document: editor.text }, 'This replaces a document')}>{writing && <Spinner />}Save</button>
                   </div>
                 </>
               ) : doc && (
@@ -184,7 +201,7 @@ export function CollectionView({ conn, env, envLabel, db, collection, readOnly, 
                   <pre className="json-view">{JSON.stringify(doc, null, 2)}</pre>
                   {canWrite && mode === 'documents' && (
                     <div className="side-actions">
-                      <button className="btn danger" disabled={busy} onClick={() => write({ action: 'delete', id: idText(doc) }, 'This deletes a document')}>Delete</button>
+                      <button className="btn danger" disabled={busy} onClick={() => write({ action: 'delete', id: idText(doc) }, 'This deletes a document')}>{writing && <Spinner />}Delete</button>
                       <button className="btn" onClick={() => setEditor({ kind: 'replace', text: JSON.stringify(doc, null, 2) })}>Edit</button>
                     </div>
                   )}

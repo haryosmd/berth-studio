@@ -6,6 +6,8 @@ import { EnvironmentsSheet } from './EnvironmentsSheet';
 import { Icon, Mark } from './Icons';
 import { QueryView } from './QueryView';
 import { TableView } from './TableView';
+import { Spinner, TreeNote } from './Status';
+import { UpdateButton } from './UpdateButton';
 import { DEFAULT_ENVIRONMENTS, effectiveEnv, findEnv, hasRead, hasWrite } from './logic';
 import type { CollectionInfo, Connection, DbError, EnvId, Environment, MongoOverview, Role, Table } from './types';
 
@@ -47,6 +49,8 @@ export function App() {
   const [status, setStatus] = useState<Status | null>(null);
   const [theme, setTheme] = useState<Theme>(() => (pref.get('theme') as Theme) || 'system');
   const [loadError, setLoadError] = useState<string | null>(null);
+  // Until the workspace is read, show a loading row instead of an empty workspace or default environments.
+  const [ready, setReady] = useState(false);
 
   useEffect(() => {
     Promise.all([api.listEnvironments(), api.listConnections()])
@@ -56,7 +60,8 @@ export function App() {
         if (!findEnv(e, env)) setEnvState(e[0].id);
         if (c.length === 1) setOpen({ [c[0].id]: true });
       })
-      .catch((e: DbError) => setLoadError(e.message ?? String(e)));
+      .catch((e: DbError) => setLoadError(e.message ?? String(e)))
+      .finally(() => setReady(true));
     // Loaded once at start; later changes come back from the sheets.
   }, []);
   useEffect(() => {
@@ -153,7 +158,7 @@ export function App() {
       <div className="titlebar" data-tauri-drag-region>
         <span className="brand" data-tauri-drag-region><Mark size={16} />Berth Studio</span>
         <span className="spacer" data-tauri-drag-region />
-        {envs.length <= 5 ? (
+        {!ready ? <Spinner label="Loading environments" /> : envs.length <= 5 ? (
           <div className="seg" role="group" aria-label="Workspace environment">
             {envs.map(e => (
               <button key={e.id} aria-pressed={env === e.id} onClick={() => setEnv(e.id)} title={e.production ? `${e.label} is a production environment` : undefined}>
@@ -172,6 +177,7 @@ export function App() {
         <button className="iconbtn" aria-label={`Theme: ${theme}`} title={`Theme: ${theme}`} onClick={() => setTheme(theme === 'system' ? 'light' : theme === 'light' ? 'dark' : 'system')}>
           <Icon name={theme === 'dark' ? 'moon' : theme === 'light' ? 'sun' : 'auto'} />
         </button>
+        <UpdateButton />
       </div>
 
       <div className="body">
@@ -182,6 +188,7 @@ export function App() {
           </div>
           <div className="side-scroll" role="tree">
             {loadError && <div className="msg error">{loadError}</div>}
+            {!ready && <TreeNote loading>Loading workspace…</TreeNote>}
             {conns.map(c => {
               const p = c.profiles[env];
               const k = `${c.id}|${env}`;
@@ -201,6 +208,8 @@ export function App() {
                     <div role="group">
                       {c.engine === 'postgres' && <button className="node child" onClick={() => newQuery(c.id)}><Icon name="code" /><span className="lbl">New query</span></button>}
                       <button className="node child" onClick={() => setSheet({ conn: c, env })}><Icon name="gear" /><span className="lbl">Edit profiles</span></button>
+                      {c.engine === 'postgres' && list === 'loading' && <TreeNote depth="child" loading>Loading tables…</TreeNote>}
+                      {c.engine === 'postgres' && Array.isArray(list) && !list.length && <TreeNote depth="child">No tables or views you can read</TreeNote>}
                       {c.engine === 'postgres' && (Array.isArray(list)
                         ? list.map(t => {
                             const key = `t|${c.id}|${t.schema}.${t.name}`;
@@ -212,12 +221,16 @@ export function App() {
                               </button>
                             );
                           })
-                        : isError(list) && <div className="node child missing" title={list.message}><span className="lbl">{list.message}</span></div>)}
+                        : isError(list) && <TreeNote depth="child" error={list.message}>{list.message}</TreeNote>)}
                       {c.engine === 'mongodb' && overview && overview !== 'loading' && !isError(overview) && (
                         <div className="node child missing"><Icon name="leaf" /><span className="lbl">MongoDB {overview.server.version} · {overview.server.topology}</span></div>
                       )}
+                      {c.engine === 'mongodb' && overview === 'loading' && <TreeNote depth="child" loading>Connecting…</TreeNote>}
+                      {c.engine === 'mongodb' && overview && overview !== 'loading' && !isError(overview) && !overview.databases.length && (
+                        <TreeNote depth="child">No databases you can read</TreeNote>
+                      )}
                       {c.engine === 'mongodb' && (isError(overview)
-                        ? <div className="node child missing" title={overview.message}><span className="lbl">{overview.message}</span></div>
+                        ? <TreeNote depth="child" error={overview.message}>{overview.message}</TreeNote>
                         : overview && overview !== 'loading' && overview.databases.map(db => {
                             const dk = `${c.id}|${env}|${db}`;
                             const colls = collections[dk];
@@ -226,6 +239,8 @@ export function App() {
                                 <button className="node child" onClick={() => toggleDb(c, db)}>
                                   <Icon name={open[dk] ? 'chevd' : 'chev'} size={12} /><Icon name="db" /><span className="lbl">{db}</span>
                                 </button>
+                                {open[dk] && colls === 'loading' && <TreeNote depth="grandchild" loading>Loading collections…</TreeNote>}
+                                {open[dk] && Array.isArray(colls) && !colls.length && <TreeNote depth="grandchild">No collections</TreeNote>}
                                 {open[dk] && (Array.isArray(colls)
                                   ? colls.map(col => {
                                       const key = `m|${c.id}|${db}.${col.name}`;
@@ -238,7 +253,7 @@ export function App() {
                                         </button>
                                       );
                                     })
-                                  : isError(colls) && <div className="node grandchild missing" title={colls.message}><span className="lbl">{colls.message}</span></div>)}
+                                  : isError(colls) && <TreeNote depth="grandchild" error={colls.message}>{colls.message}</TreeNote>)}
                               </div>
                             );
                           }))}
@@ -247,7 +262,7 @@ export function App() {
                 </div>
               );
             })}
-            {!conns.length && !loadError && (
+            {ready && !conns.length && !loadError && (
               <div className="empty">
                 <h3>No connections yet</h3>
                 <p>Add a PostgreSQL or MongoDB connection with a profile for each environment.</p>

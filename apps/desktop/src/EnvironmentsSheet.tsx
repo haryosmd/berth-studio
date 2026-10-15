@@ -3,6 +3,7 @@
 import { useState } from 'react';
 import { api } from './api';
 import { Icon } from './Icons';
+import { Spinner } from './Status';
 import { nextEnvId, validEnvId } from './logic';
 import { CONFIRM_ENV_DELETE, type DbError, type Environment } from './types';
 
@@ -98,14 +99,14 @@ export function EnvironmentsSheet({ environments, onClose, onSaved }: Props) {
             <div className="errors" role="alert">
               <b>{confirm.message}</b> Their profiles and saved passwords will be deleted:
               <pre style={{ margin: '4px 0 8px', whiteSpace: 'pre-wrap', fontFamily: 'var(--font-mono)' }}>{confirm.detail}</pre>
-              <button type="button" className="btn danger solid" disabled={busy} onClick={() => save(true)}>Delete these profiles and save</button>
+              <button type="button" className="btn danger solid" disabled={busy} onClick={() => save(true)}>{busy && <Spinner />}Delete these profiles and save</button>
             </div>
           )}
         </div>
         <footer>
           <span className="grow" />
           <button type="button" className="btn" onClick={onClose}>Cancel</button>
-          <button type="submit" className="btn primary" disabled={busy || badIds.length > 0}>Save</button>
+          <button type="submit" className="btn primary" disabled={busy || badIds.length > 0}>{busy ? <><Spinner />Saving…</> : 'Save'}</button>
         </footer>
       </form>
     </div>

@@ -71,15 +71,13 @@ jobs:
           brew install postgresql@16
           PG_BIN="$(brew --prefix postgresql@16)/bin" scripts/dev-db/start.sh
       - name: Start the throwaway MongoDB replica set
-        # MongoDB is not in homebrew/core. Homebrew loads formulae from a third-party tap only once they
-        # are trusted, so trust exactly the ones this install loads rather than the whole tap:
-        # the server, its database-tools dependency, and mongodb-enterprise, which is only read to
-        # check that the two do not conflict.
+        # MongoDB is not in homebrew/core, and Homebrew loads formulae from a third-party tap only once
+        # they are trusted. Installing the server also reads every formula it conflicts with, and that
+        # set differs between Homebrew versions, so the runner trusts MongoDB's official tap as a whole.
+        # The runner is discarded after the job and holds no secrets.
         run: |
           brew tap mongodb/brew
-          brew trust --formula mongodb/brew/mongodb-community@8.0
-          brew trust --formula mongodb/brew/mongodb-database-tools
-          brew trust --formula mongodb/brew/mongodb-enterprise
+          brew trust mongodb/brew
           brew install mongodb/brew/mongodb-community@8.0
           scripts/dev-db/mongo-start.sh
       - run: cargo test --workspace --locked

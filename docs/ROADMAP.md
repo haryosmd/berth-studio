@@ -67,7 +67,7 @@ Next:
 - Signing and distribution:
   - Developer ID signing, the hardened runtime and notarization;
   - a `.dmg`.
-- Updates signed with minisign.
+- Updates signed with minisign (done: in-app update icon, release workflow on version tags; see [RELEASING.md](RELEASING.md)).
 - Release provenance:
   - build-provenance attestations;
   - an SBOM;

@@ -77,8 +77,11 @@ const docs = (list: { [k: string]: Json }[], truncated = false): Documents => ({
 const prod = (env: string) => !!envs.find(e => e.id === env)?.production;
 const confirmError = (id: string) => ({ message: `Writing to production needs confirmation. Type ${id} to continue.`, code: 'BERTH_CONFIRM_PROD' });
 
+// Open the preview with ?slow to see the loading states.
+const DELAY = new URLSearchParams(location.search).has('slow') ? 1500 : 120;
+
 export async function invoke<T>(cmd: string, args: Record<string, any> = {}): Promise<T> {
-  await wait(120);
+  await wait(DELAY);
   switch (cmd) {
     case 'list_environments': return structuredClone(envs) as T;
     case 'save_environments': {
@@ -107,7 +110,8 @@ export async function invoke<T>(cmd: string, args: Record<string, any> = {}): Pr
       if (write && p && !p.endpoints.some(e => e.role === 'write')) throw { message: `The ${args.env} profile of ${args.id} has no write endpoint, so it can only read.`, code: 'BERTH_NO_WRITE' };
       if (write && prod(args.env) && args.confirm !== args.id) throw confirmError(args.id);
       const res: RunResult = {
-        results: write ? [{ columns: [], rows: [], truncated: false, affected: 1 }] : [users(0, 18)],
+        results: write ? [{ columns: [], rows: [], truncated: false, affected: 1 }]
+          : /\bwhere\s+false\b/i.test(args.sql) ? [{ ...users(0, 0), affected: 0 }] : [users(0, 18)],
         role: write ? 'write' : 'read',
         reason: write ? 'The statement contains UPDATE.' : 'Read-only statement, routed to the read endpoint.',
         host: write ? 'db-w.dev.acme.internal' : 'db-r.dev.acme.internal', readOnly: !write, elapsedMs: 12,
@@ -137,6 +141,17 @@ export async function invoke<T>(cmd: string, args: Record<string, any> = {}): Pr
       if (prod(args.env) && args.confirm !== args.id) throw confirmError(args.id);
       return { message: args.change.action === 'delete' ? 'Deleted the document.' : args.change.action === 'insert' ? 'Inserted a document.' : 'Saved the document.' } as T;
     }
+    case 'check_update': return { currentVersion: '0.1.0', version: '0.2.0', date: '2026-10-20T09:00:00Z',
+      notes: "What's new\n- Filter bar in the table browser\n- Export results to CSV and JSON\n- Faster MongoDB collection counts" } as T;
+    case 'install_update': {
+      const send = args.onProgress as (p: object) => void;
+      const total = 24_800_000;
+      send({ event: 'started', total });
+      for (let done = 0; done < total;) { await wait(90); done = Math.min(total, done + 1_900_000); send({ event: 'chunk', downloaded: done }); }
+      send({ event: 'installed' });
+      return undefined as T;
+    }
+    case 'restart_app': location.reload(); return undefined as T;
     default: throw { message: `unknown command ${cmd}` };
   }
 }

@@ -41,6 +41,7 @@ Every dependency is attack surface, so each one is here with the reason it exist
 | `zeroize` | 1.9.1 | Wipes passwords from memory after use | RustCrypto |
 | `mongodb` | 3.9.1 (with `bson` 2.15.0) | The official MongoDB driver. Default features only: `rustls-tls` and `dns-resolver` (for `mongodb+srv://`, through `hickory-resolver`) | MongoDB, Inc.; Apache-2.0 |
 | `futures-util` | 0.3.34 | Reading driver cursors as streams (`std` feature only) | rust-lang |
+| `tauri-plugin-updater` | =2.13.2 | In-app updates: checks the release manifest, verifies the minisign signature (`minisign-verify`), installs the new bundle. Features `rustls-tls` and `system-proxy` only; `zip` is for Windows installers and is left out | Tauri Programme; pulls in `tar`, `tempfile`, `hyper-rustls` and `osakit` (AppleScript bridge for installs that need admin rights) |
 
 Cryptography comes from `ring` 0.17.14, through rustls.
 

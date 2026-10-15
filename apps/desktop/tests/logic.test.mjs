@@ -3,7 +3,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   DEFAULT_ENVIRONMENTS, swapEnvToken, copyProfile, cellKind, display, roleIndex, lineCol, shortType, blankProfile, effectiveEnv,
-  hasWrite, nextEnvId, validEnvId, documentsToGrid, cellText, bsonType, idText,
+  hasWrite, nextEnvId, validEnvId, documentsToGrid, cellText, bsonType, idText, formatBytes,
 } from '../src/logic.ts';
 
 const [dev, staging, prod] = DEFAULT_ENVIRONMENTS;
@@ -93,4 +93,10 @@ test('passwords are matched by the index within a role', () => {
 
 test('lineCol turns a Postgres position into line and column', () => {
   assert.deepEqual(lineCol('SELECT 1,\n  nope FROM t', 13), { line: 2, col: 3 });
+});
+
+test('formatBytes shows kilobytes below a megabyte and one decimal above', () => {
+  assert.equal(formatBytes(0), '0 KB');
+  assert.equal(formatBytes(860_000), '840 KB');
+  assert.equal(formatBytes(13_002_342), '12.4 MB');
 });
