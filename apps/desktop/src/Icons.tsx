@@ -15,6 +15,8 @@ const P: Record<string, ReactElement> = {
   code: <path d="M6 4.5L2.5 8 6 11.5M10 4.5L13.5 8 10 11.5" />,
   lock: <><rect x="3.5" y="7" width="9" height="6.5" rx="1.2" /><path d="M5.5 7V5a2.5 2.5 0 0 1 5 0v2" /></>,
   gear: <><circle cx="8" cy="8" r="2.2" /><path d="M8 1.8v1.6M8 12.6v1.6M1.8 8h1.6M12.6 8h1.6M3.6 3.6l1.1 1.1M11.3 11.3l1.1 1.1M3.6 12.4l1.1-1.1M11.3 4.7l1.1-1.1" /></>,
+  download: <path d="M8 2.5v7.5M4.8 7l3.2 3.2L11.2 7M3 12.8h10" />,
+  restart: <><path d="M12.8 8A4.8 4.8 0 1 1 11.4 4.6" /><path d="M11.8 2.2v2.6H9.2" /></>,
   chev: <path d="M6 4l4 4-4 4" />,
   chevd: <path d="M4 6l4 4 4-4" />,
   leaf: <><path d="M8 1.8c2.6 2.2 3.6 4.6 3.6 7 0 2.6-1.6 4.4-3.6 5.4-2-1-3.6-2.8-3.6-5.4 0-2.4 1-4.8 3.6-7z" /><path d="M8 4.5v10" /></>,

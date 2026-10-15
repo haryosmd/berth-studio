@@ -44,6 +44,7 @@ Berth Studio nyatuin semuanya dalam satu jendela, dan tetap memperlakukan produc
   - Setiap edit di grid menampilkan SQL-nya dulu sebelum dijalankan.
   - Mau nulis ke prod, harus ngetik nama koneksinya dulu.
 - **Secret:** Password dan token disimpan di keychain sistem. Nggak pernah masuk ke file workspace, dan nggak pernah tampil di UI.
+- **Update:** Begitu ada versi baru, ikon muncul di kanan atas. Sekali klik untuk mengunduh, dan aplikasi hanya memasangnya kalau tanda tangannya terbukti asli.
 
 ## Coba sekarang
 
@@ -94,6 +95,7 @@ npm test
 | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | Cara aplikasinya dibangun dan alasannya, dalam bahasa Inggris |
 | [`docs/ROADMAP.md`](docs/ROADMAP.md) | Yang sudah selesai dan yang berikutnya, dalam bahasa Inggris |
 | [`docs/SECURITY.md`](docs/SECURITY.md) | Threat model dan semua kontrol keamanan, dalam bahasa Inggris |
+| [`docs/RELEASING.md`](docs/RELEASING.md) | Cara rilis dan update di dalam aplikasi bekerja, termasuk kunci tanda tangan dan password-nya, dalam bahasa Inggris |
 
 ## Keamanan
 

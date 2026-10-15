@@ -4,6 +4,7 @@
 import { useState } from 'react';
 import { api } from './api';
 import { Icon } from './Icons';
+import { Spinner } from './Status';
 import { blankEndpoint, blankProfile, copyProfile, findEnv, hasWrite, roleIndex } from './logic';
 import type { Connection, DbError, Endpoint, EndpointCheck, Engine, EnvId, Environment, PasswordInput, Profile } from './types';
 
@@ -26,7 +27,7 @@ export function ConnectionSheet({ existing, startEnv, environments, onClose, onS
   const [pw, setPw] = useState<Record<string, string>>({});
   const [error, setError] = useState<DbError | null>(null);
   const [checks, setChecks] = useState<EndpointCheck[] | null>(null);
-  const [busy, setBusy] = useState(false);
+  const [busy, setBusy] = useState<'test' | 'save' | 'delete' | null>(null);
   const [confirmDelete, setConfirmDelete] = useState(false);
 
   const environment = findEnv(environments, env) ?? startEnvironment;
@@ -50,22 +51,22 @@ export function ConnectionSheet({ existing, startEnv, environments, onClose, onS
   };
 
   const save = async () => {
-    setBusy(true); setError(null);
+    setBusy('save'); setError(null);
     try {
       const kept = Object.fromEntries(Object.entries(profiles).filter(([, v]) => v));
       onSaved(await api.saveConnection({ id: id.trim(), engine, profiles: kept }, passwords()));
-    } catch (e) { setError(e as DbError); } finally { setBusy(false); }
+    } catch (e) { setError(e as DbError); } finally { setBusy(null); }
   };
   const test = async () => {
     if (!p) return;
-    setBusy(true); setError(null); setChecks(null);
+    setBusy('test'); setError(null); setChecks(null);
     try { setChecks(await api.testProfile(id.trim() || 'new-connection', engine, env, p, passwords().filter(x => x.env === env))); }
-    catch (e) { setError(e as DbError); } finally { setBusy(false); }
+    catch (e) { setError(e as DbError); } finally { setBusy(null); }
   };
   const remove = async () => {
     if (!existing) return;
-    setBusy(true);
-    try { await api.deleteConnection(existing.id); onDeleted(existing.id); } catch (e) { setError(e as DbError); setBusy(false); }
+    setBusy('delete');
+    try { await api.deleteConnection(existing.id); onDeleted(existing.id); } catch (e) { setError(e as DbError); setBusy(null); }
   };
 
   const passwordField = (i: number, e: Endpoint) => {
@@ -197,12 +198,16 @@ export function ConnectionSheet({ existing, startEnv, environments, onClose, onS
         </div>
         <footer>
           {existing && (confirmDelete
-            ? <><span className="muted">Delete {existing.id} and its saved passwords?</span><button type="button" className="btn danger solid" disabled={busy} onClick={remove}>Delete</button><button type="button" className="btn" onClick={() => setConfirmDelete(false)}>Keep</button></>
+            ? <><span className="muted">Delete {existing.id} and its saved passwords?</span><button type="button" className="btn danger solid" disabled={!!busy} onClick={remove}>{busy === 'delete' && <Spinner />}Delete</button><button type="button" className="btn" onClick={() => setConfirmDelete(false)}>Keep</button></>
             : <button type="button" className="btn danger" onClick={() => setConfirmDelete(true)}>Delete…</button>)}
           <span className="grow" />
-          <button type="button" className="btn" disabled={busy || !p} onClick={test}>Test {environment.label}</button>
+          <button type="button" className="btn" disabled={!!busy || !p} onClick={test}>
+            {busy === 'test' ? <><Spinner />Testing…</> : `Test ${environment.label}`}
+          </button>
           <button type="button" className="btn" onClick={onClose}>Cancel</button>
-          <button type="submit" className="btn primary" disabled={busy || !id.trim() || !Object.values(profiles).some(Boolean)}>Save</button>
+          <button type="submit" className="btn primary" disabled={!!busy || !id.trim() || !Object.values(profiles).some(Boolean)}>
+            {busy === 'save' ? <><Spinner />Saving…</> : 'Save'}
+          </button>
         </footer>
       </form>
     </div>

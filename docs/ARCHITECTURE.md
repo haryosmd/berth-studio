@@ -144,6 +144,11 @@ The webview can call exactly the commands below. Each one is listed in `apps/des
 | `aggregate` | Runs a pipeline; one that writes follows the production and read-only rules |
 | `list_indexes` | Index names, keys and uniqueness |
 | `write_document` | Inserts, replaces or deletes one document by `_id`, behind the same guards |
+| `check_update` | Asks the latest GitHub release whether a newer version exists |
+| `install_update` | Downloads, verifies and installs that version, streaming progress over a channel |
+| `restart_app` | Restarts into the installed update |
+
+The updater plugin is registered for its Rust API only. Its own commands are not in the capability file, so the webview cannot call them.
 
 The webview runs under a strict Content Security Policy, set in `tauri.conf.json`:
 - scripts only from the app bundle;
@@ -163,6 +168,12 @@ React 19 with a handful of components and no state library. The pieces are:
 - **Grids:** virtualised with TanStack Virtual. MongoDB documents are shown as a grid of top-level fields, with the selected document as JSON beside it.
 - **Environment switcher:** a segmented control for up to five environments, a menu beyond that. Each tab follows the switcher unless it is pinned to its own environment, so two environments can be open side by side. A tab in a production environment is tinted red, whatever the switcher shows.
 - **Previewing in a browser:** when the interface runs outside Tauri during development, `apps/desktop/src/mock.ts` stands in for the backend. It is never part of a production build.
+
+## Updates
+
+Releases are built and published by a workflow when a version tag is pushed; see [RELEASING.md](RELEASING.md). Installed copies check `latest.json` from the newest GitHub release five seconds after launch and every six hours, using `tauri-plugin-updater` from Rust. When a newer version exists, an icon appears at the right of the title bar. Its panel shows the version, the release date and the release notes as plain text, then downloads with progress and offers a restart.
+
+An update is installed only when its minisign signature matches the public key built into the app and the version inside the signature matches the announced one, so neither a tampered package nor a replayed older release is accepted. A failed check is silent and retried at the next interval.
 
 ## Testing
 

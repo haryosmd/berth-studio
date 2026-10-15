@@ -3,13 +3,16 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod app;
+mod update;
 mod workspace;
 
 use app::{App, DocumentWrite, EndpointCheck, MongoOverview, Page, PasswordInput, RunResult, WriteOutcome};
 use berth_core::{Connection, Engine, EnvId, Environment, Profile, RouteMode};
 use berth_mongo::{CollectionInfo, Documents, FindRequest};
 use berth_postgres::{DbError, Table};
-use tauri::{Manager, State};
+use tauri::ipc::Channel;
+use tauri::{AppHandle, Manager, State};
+use update::{Pending, Progress, UpdateInfo};
 
 #[tauri::command]
 async fn list_environments(app: State<'_, App>) -> Result<Vec<Environment>, DbError> {
@@ -143,8 +146,26 @@ async fn write_document(
     app.write_document(&id, &env, &db, &collection, change, confirm.as_deref()).await
 }
 
+#[tauri::command]
+async fn check_update(app: AppHandle, pending: State<'_, Pending>) -> Result<Option<UpdateInfo>, DbError> {
+    update::check(&app, &pending).await
+}
+
+#[tauri::command]
+async fn install_update(pending: State<'_, Pending>, on_progress: Channel<Progress>) -> Result<(), DbError> {
+    update::install(&pending, on_progress).await
+}
+
+/// Restarts into the version that `install_update` put in place.
+#[tauri::command]
+fn restart_app(app: AppHandle) {
+    app.restart()
+}
+
 fn main() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .manage(Pending::default())
         .setup(|handle| {
             let dir = handle.path().app_data_dir()?;
             std::fs::create_dir_all(&dir)?;
@@ -174,7 +195,10 @@ fn main() {
             find_documents,
             aggregate,
             list_indexes,
-            write_document
+            write_document,
+            check_update,
+            install_update,
+            restart_app
         ])
         .run(tauri::generate_context!())
         .expect("error while running Berth Studio");

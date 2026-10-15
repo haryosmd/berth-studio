@@ -3,7 +3,7 @@
 // stands in; it is only loaded in development builds.
 import type {
   CollectionInfo, Connection, DocumentWrite, Documents, EndpointCheck, Engine, EnvId, Environment, FindRequest, MongoOverview,
-  Page, PasswordInput, Profile, RouteMode, RunResult, Table,
+  Page, PasswordInput, Profile, RouteMode, RunResult, Table, UpdateInfo, UpdateProgress,
 } from './types';
 
 type Invoke = <T>(cmd: string, args?: Record<string, unknown>) => Promise<T>;
@@ -49,4 +49,15 @@ export const api = {
     call<{ name: string; keys: Record<string, unknown>; unique: boolean }[]>('list_indexes', { id, env, db, collection }),
   writeDocument: (id: string, env: EnvId, db: string, collection: string, change: DocumentWrite, confirm: string | null) =>
     call<{ message: string }>('write_document', { id, env, db, collection, change, confirm }),
+
+  checkUpdate: () => call<UpdateInfo | null>('check_update'),
+  /** Downloads, verifies and installs the update from the last check; `onProgress` follows the download. */
+  installUpdate: async (onProgress: (p: UpdateProgress) => void) => {
+    if (!('__TAURI_INTERNALS__' in window)) return call<void>('install_update', { onProgress });
+    const { Channel } = await import('@tauri-apps/api/core');
+    const channel = new Channel<UpdateProgress>();
+    channel.onmessage = onProgress;
+    return call<void>('install_update', { onProgress: channel });
+  },
+  restartApp: () => call<void>('restart_app'),
 };

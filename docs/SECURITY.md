@@ -137,6 +137,13 @@ These controls guard against human error. That threat is real even though nobody
   - Anything it does not recognise runs on the primary.
 - **Grid edits:** they show the exact SQL with bound parameters before commit, and run in one transaction.
 
+- **Updates** (implemented; `update.rs`, `release.yml`):
+  - Update packages are signed with a minisign key that exists only as a secret of the protected `release` environment. The app refuses a package whose signature does not match the public key compiled into it.
+  - `requireSignedVersion` is on: the version inside the signature must match the version in `latest.json`, so a tampered manifest cannot replay an older, validly signed release.
+  - The manifest and package are fetched over HTTPS with rustls. Only `v*` tags, which only maintainers can create, trigger a release.
+  - Release notes are shown as plain text, never as HTML.
+  - **Privacy:** the check is an anonymous `GET` to GitHub when the app opens and every six hours. It carries no account, workspace or usage data; GitHub sees the IP address and the updater's user agent.
+
 ## 6. A compromised or hostile machine
 
 **Malware with the user's privileges.** Such malware can watch the screen, log keystrokes and read the memory of processes the user owns. No desktop app can fully defend against that, and Berth Studio does not claim to. What Berth Studio does is keep the damage small and short-lived.

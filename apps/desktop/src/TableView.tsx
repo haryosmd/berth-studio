@@ -1,6 +1,7 @@
 import { useEffect, useState, type ReactNode } from 'react';
 import { api } from './api';
 import { Grid } from './Grid';
+import { Placeholder, Spinner } from './Status';
 import type { DbError, EnvId, Page } from './types';
 import type { Status } from './App';
 
@@ -44,14 +45,17 @@ export function TableView({ conn, env, schema, table, envControl, onStatus }: Pr
         <span className="crumb"><span className="faint">{conn} · {schema}.</span>{table}</span>
         <span className="grow" />
         {envControl}
-        <span className="faint">{page ? `Rows ${offset + 1}–${offset + page.rows.length}` : ''}</span>
+        {loading && page && <Spinner label="Loading rows" />}
+        <span className="faint">{page?.rows.length ? `Rows ${offset + 1}–${offset + page.rows.length}` : ''}</span>
         <button className="btn" disabled={offset === 0 || loading} onClick={() => setOffset(Math.max(0, offset - PAGE))}>Previous</button>
         <button className="btn" disabled={!page || page.rows.length < PAGE || loading} onClick={() => setOffset(offset + PAGE)}>Next</button>
         <button className="btn" disabled={loading} onClick={() => setNonce(n => n + 1)}>Refresh</button>
       </div>
       {error ? <div className="msg error"><b>{error.message}</b>{error.detail && <pre>{error.detail}</pre>}</div>
-        : page ? <Grid columns={page.columns} rows={page.rows} offset={offset} />
-        : <div className="msg faint">Loading…</div>}
+        : !page ? <Placeholder loading title={`Loading ${table}…`} />
+        : page.rows.length ? <Grid columns={page.columns} rows={page.rows} offset={offset} />
+        : offset > 0 ? <Placeholder title="No more rows">This is the end of {table}. Go back with Previous.</Placeholder>
+        : <Placeholder title={`${table} is empty`}>The table has no rows yet.</Placeholder>}
     </div>
   );
 }

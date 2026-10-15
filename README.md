@@ -44,6 +44,7 @@ Berth Studio puts all of that in one window, and it treats production with the c
   - Every grid edit shows its SQL before it runs.
   - Writing to prod means typing the connection name first.
 - **Secrets:** Passwords and tokens stay in your system keychain. They never go into workspace files or show up in the UI.
+- **Updates:** When a new version is released, an icon appears at the top right. One click downloads it, and the app installs it only if its signature checks out.
 
 ## Try it
 
@@ -94,6 +95,7 @@ npm test
 | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | How the app is built, and why |
 | [`docs/ROADMAP.md`](docs/ROADMAP.md) | What's done and what comes next |
 | [`docs/SECURITY.md`](docs/SECURITY.md) | The threat model and every security control |
+| [`docs/RELEASING.md`](docs/RELEASING.md) | How releases and in-app updates work, including the signing key and its password |
 
 ## Security
 

@@ -1,0 +1,76 @@
+# Builds, signs and publishes a release when a version tag is pushed (for example v0.2.0).
+# Installed copies of Berth Studio read latest.json from the newest release and offer the update.
+#
+# Hardening:
+#   - Runs only on tags. The tag ruleset lets only maintainers create v* tags.
+#   - The updater signing key lives in the protected `release` environment, never in the
+#     repository or in pull request workflows. Only this job can read it.
+#   - Actions are GitHub's own, pinned to full commit SHAs, as in ci.yml. Uploads use the
+#     preinstalled GitHub CLI with this job's token, which can only write releases.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions: {}
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  npm_config_ignore_scripts: "true"
+
+jobs:
+  macos:
+    name: Build and publish (macOS universal)
+    runs-on: macos-15
+    timeout-minutes: 90
+    environment: release
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: The tag matches the app version
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          app="$(node -p "require('./apps/desktop/src-tauri/tauri.conf.json').version")"
+          crate="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
+          echo "tag $tag, tauri.conf.json $app, Cargo.toml $crate"
+          test "$tag" = "$app" && test "$tag" = "$crate"
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          package-manager-cache: false
+      - name: Install the toolchain pinned in rust-toolchain.toml, for both Mac architectures
+        run: |
+          rustup toolchain install
+          rustup target add aarch64-apple-darwin x86_64-apple-darwin
+      - run: npm ci --ignore-scripts
+      - name: Build the universal app and sign the update package
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: npm run tauri build -- --target universal-apple-darwin --bundles app,dmg --config src-tauri/tauri.release.conf.json
+      - name: Publish the release and its update manifest
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          bundle=target/universal-apple-darwin/release/bundle
+          package="Berth-Studio_${version}_universal.app.tar.gz"
+          mkdir out
+          cp "$bundle/macos/Berth Studio.app.tar.gz" "out/$package"
+          cp "$bundle/macos/Berth Studio.app.tar.gz.sig" "out/$package.sig"
+          cp "$bundle"/dmg/*.dmg "out/Berth-Studio_${version}_universal.dmg"
+          gh api "repos/$GITHUB_REPOSITORY/releases/generate-notes" -f tag_name="$GITHUB_REF_NAME" --jq .body > notes.md
+          node scripts/release/latest-json.mjs "$version" "out/$package.sig" \
+            "https://github.com/$GITHUB_REPOSITORY/releases/download/$GITHUB_REF_NAME/$package" notes.md > out/latest.json
+          (cd out && shasum -a 256 -- * > SHA256SUMS)
+          # A pre-release (v0.3.0-beta.1) is published but never marked latest, so installed copies do not see it.
+          case "$version" in *-*) channel="--prerelease --latest=false" ;; *) channel="--latest" ;; esac
+          gh release create "$GITHUB_REF_NAME" out/* --verify-tag --title "Berth Studio $version" --notes-file notes.md $channel
