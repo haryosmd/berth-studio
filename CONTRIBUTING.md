@@ -19,6 +19,28 @@ Every pull request needs two things.
 1. **The Contributor License Agreement.** Read [CLA.md](CLA.md). On your first pull request, the CLA Assistant bot asks you to sign it with a comment, and you only sign once. The CLA lets the project change its license later without asking every contributor again. You keep the copyright to your work.
 2. **A Developer Certificate of Origin sign-off on every commit.** Use `git commit -s`. It adds `Signed-off-by: Your Name <you@example.com>` and confirms you wrote the change or have the right to submit it.
 
+## Signed commits
+
+`main` only accepts commits with a verified signature, so set up signing once on every computer you commit from. An SSH key works and needs no GPG. Use a separate key per computer; GitHub accepts several, and removing one never affects the others.
+
+1. Register the computer's public key on GitHub as a **signing** key. The first command grants `gh` permission to manage signing keys:
+
+```bash
+gh auth refresh -h github.com -s admin:ssh_signing_key
+```
+
+```bash
+gh ssh-key add ~/.ssh/id_ed25519.pub --type signing --title "Work laptop"
+```
+
+2. In your clone, sign every commit and tag with that key:
+
+```bash
+git config gpg.format ssh && git config user.signingkey ~/.ssh/id_ed25519.pub && git config commit.gpgsign true && git config tag.gpgsign true
+```
+
+The commit email must be one of the verified emails on your GitHub account. If a pull request is blocked because a commit is unsigned, sign it again and push the branch: `git commit --amend --no-edit -S && git push --force-with-lease`.
+
 ## Making a change
 
 Run the JavaScript tests, for the prototype and the UI helpers:
@@ -81,4 +103,4 @@ npm install --ignore-scripts --before=2026-10-08 <package>@<version>
 - **Approval:** a code owner must approve, and CI must pass.
 - **Stricter paths:** changes to `.github/`, `apps/desktop/src-tauri/`, `crates/berth-secrets/`, signing, updates or secret storage need a second maintainer once the project has one.
 - **Pull requests from forks:** their CI runs without repository secrets.
-- **Releases:** a maintainer cuts them from a signed tag through a protected GitHub environment. [docs/SECURITY.md](docs/SECURITY.md) explains the full release process.
+- **Releases:** a maintainer cuts them from a signed tag through a protected GitHub environment. [docs/RELEASING.md](docs/RELEASING.md) explains the full release process.
