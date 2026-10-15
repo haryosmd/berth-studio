@@ -1,0 +1,27 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "main",
+  "description": "The only window. Core window features plus Berth Studio's own commands; no shell, no file system, no HTTP.",
+  "windows": [
+    "main"
+  ],
+  "permissions": [
+    "core:default",
+    "allow-list-environments",
+    "allow-save-environments",
+    "allow-list-connections",
+    "allow-save-connection",
+    "allow-delete-connection",
+    "allow-test-profile",
+    "allow-list-tables",
+    "allow-browse-table",
+    "allow-run-query",
+    "allow-cancel-query",
+    "allow-mongo-overview",
+    "allow-list-collections",
+    "allow-find-documents",
+    "allow-aggregate",
+    "allow-list-indexes",
+    "allow-write-document"
+  ]
+}

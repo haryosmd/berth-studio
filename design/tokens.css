@@ -1,0 +1,75 @@
+/* Berth Studio design tokens, extracted from design/prototype.html.
+   Layers: primitives (hex) -> semantic roles (--win, --fg, --accent, --t-*) -> component use.
+   Light values live on bare :root; dark values are redefined for prefers-color-scheme and [data-theme="dark"].
+   Alternative accents: [data-accent="indigo" | "amber"]. Density: [data-density="regular"].
+   The desktop app imports this file directly (apps/desktop/src/styles.css). */
+:root{
+  --font-display:"Bricolage Grotesque","Geist",-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
+  --font-ui:"Geist",-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
+  --font-mono:"Geist Mono","SF Mono",ui-monospace,Menlo,Consolas,monospace;
+  --font-hand:"Caveat","Marker Felt","Bradley Hand",cursive;
+
+  /* surfaces: neutrals biased toward the harbor teal */
+  --page:#E3E9E8; --win:#FAFCFC; --side:#EEF3F2; --raise:#FFFFFF; --sunk:#E9EFEE;
+  --hover:rgba(14,60,58,.06); --line:#D9E1E0; --line-2:#C3CECC;
+  --fg:#11201F; --fg-2:#4A5A59; --fg-3:#7B8B8A;
+  /* accent */
+  --accent:#0B8580; --accent-fg:#FFFFFF;
+  /* semantic */
+  --ok:#1E8E50; --warn:#B26A00; --danger:#C8372F;
+  /* data types (grid cells, JSON, syntax) */
+  --t-num:#1F5FC4; --t-str:#1E7D52; --t-null:#93A1A0; --t-json:#7E45BE; --t-date:#B85A06; --t-bool:#B02F68; --t-key:#9A7400; --t-kw:#0B6A8C;
+  /* sketch */
+  --note:#FFF0B3; --note-fg:#594800;
+  --grid-dot:rgba(17,32,31,.13); --scrim:rgba(12,24,23,.30);
+  --shadow-win:0 40px 80px -30px rgba(10,40,38,.45),0 0 0 1px rgba(10,40,38,.10);
+  --shadow-pop:0 18px 40px -12px rgba(10,40,38,.30),0 0 0 1px rgba(10,40,38,.10);
+
+  /* derived — follow accent & theme automatically */
+  --accent-soft:color-mix(in srgb,var(--accent) 13%,var(--win));
+  --accent-line:color-mix(in srgb,var(--accent) 45%,var(--win));
+  --sel:color-mix(in srgb,var(--accent) 10%,transparent);
+  --ok-soft:color-mix(in srgb,var(--ok) 14%,var(--win));
+  --warn-soft:color-mix(in srgb,var(--warn) 15%,var(--win));
+  --danger-soft:color-mix(in srgb,var(--danger) 13%,var(--win));
+  --m-get:var(--ok); --m-post:var(--warn); --m-put:var(--t-num); --m-patch:var(--t-json); --m-delete:var(--danger);
+  --env-dev:var(--ok); --env-staging:var(--warn); --env-prod:var(--danger);
+
+  --row-h:28px; --r-sm:5px; --r-md:8px; --r-lg:12px;
+}
+@media (prefers-color-scheme: dark){ :root:not([data-theme="light"]){
+  --page:#060A0A; --win:#0F1615; --side:#0B1110; --raise:#16201F; --sunk:#0A100F;
+  --hover:rgba(200,235,232,.05); --line:#1E2A29; --line-2:#2C3B39;
+  --fg:#E2ECEA; --fg-2:#9AAEAB; --fg-3:#667A78;
+  --accent:#3DBFB5; --accent-fg:#03201D;
+  --ok:#4CC688; --warn:#E8A33A; --danger:#F06A60;
+  --t-num:#74A9FF; --t-str:#62C994; --t-null:#5E716F; --t-json:#B88CF2; --t-date:#EFA160; --t-bool:#F07BAE; --t-key:#E2BE47; --t-kw:#63C6E6;
+  --note:#38321A; --note-fg:#F2DE8A;
+  --grid-dot:rgba(226,236,234,.07); --scrim:rgba(0,0,0,.55);
+  --shadow-win:0 40px 80px -30px rgba(0,0,0,.8),0 0 0 1px rgba(255,255,255,.07);
+  --shadow-pop:0 18px 40px -12px rgba(0,0,0,.7),0 0 0 1px rgba(255,255,255,.08);
+  color-scheme:dark;
+}}
+:root[data-theme="dark"]{
+  --page:#060A0A; --win:#0F1615; --side:#0B1110; --raise:#16201F; --sunk:#0A100F;
+  --hover:rgba(200,235,232,.05); --line:#1E2A29; --line-2:#2C3B39;
+  --fg:#E2ECEA; --fg-2:#9AAEAB; --fg-3:#667A78;
+  --accent:#3DBFB5; --accent-fg:#03201D;
+  --ok:#4CC688; --warn:#E8A33A; --danger:#F06A60;
+  --t-num:#74A9FF; --t-str:#62C994; --t-null:#5E716F; --t-json:#B88CF2; --t-date:#EFA160; --t-bool:#F07BAE; --t-key:#E2BE47; --t-kw:#63C6E6;
+  --note:#38321A; --note-fg:#F2DE8A;
+  --grid-dot:rgba(226,236,234,.07); --scrim:rgba(0,0,0,.55);
+  --shadow-win:0 40px 80px -30px rgba(0,0,0,.8),0 0 0 1px rgba(255,255,255,.07);
+  --shadow-pop:0 18px 40px -12px rgba(0,0,0,.7),0 0 0 1px rgba(255,255,255,.08);
+  color-scheme:dark;
+}
+/* accent alternatives (review decision) */
+:root[data-accent="indigo"]{--accent:#4F46E5;--accent-fg:#FFFFFF}
+:root[data-accent="amber"]{--accent:#B45309;--accent-fg:#FFFFFF}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"])[data-accent="indigo"]{--accent:#8F8BFF;--accent-fg:#0E0B33}
+  :root:not([data-theme="light"])[data-accent="amber"]{--accent:#F5A524;--accent-fg:#2A1700}
+}
+:root[data-theme="dark"][data-accent="indigo"]{--accent:#8F8BFF;--accent-fg:#0E0B33}
+:root[data-theme="dark"][data-accent="amber"]{--accent:#F5A524;--accent-fg:#2A1700}
+:root[data-density="regular"]{--row-h:34px}

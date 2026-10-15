@@ -1,0 +1,25 @@
+# Checks that every crate in Cargo.lock is at least 7 days old and not yanked.
+# It makes one request per crate to crates.io, so it runs only when the lockfile changes and
+# once a week, not on every push.
+name: Crate ages
+
+on:
+  pull_request:
+    paths: [Cargo.lock]
+  schedule:
+    - cron: "17 3 * * 1"
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  check:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: python3 scripts/check-crate-ages.py

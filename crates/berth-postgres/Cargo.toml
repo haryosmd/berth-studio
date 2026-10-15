@@ -1,0 +1,25 @@
+[package]
+name = "berth-postgres"
+description = "PostgreSQL driver for Berth Studio: sessions per endpoint, catalog browsing, query runs."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+berth-core = { path = "../berth-core" }
+serde = { version = "1", features = ["derive"] }
+thiserror = "2.0.21"
+tokio = { version = "1.47", default-features = false, features = ["rt", "time", "sync"] }
+tokio-postgres = { version = "0.7.18", default-features = false, features = ["runtime"] }
+tokio-postgres-rustls = { version = "0.14.0", features = ["ring"] }
+# 0.23.46 fixes RUSTSEC-2026-0346 and RUSTSEC-2026-0347; security fixes skip the 7-day wait.
+rustls = { version = "0.23.46", default-features = false, features = ["ring", "std", "tls12"] }
+rustls-platform-verifier = "0.7.1"
+
+[dev-dependencies]
+tokio = { version = "1.47", default-features = false, features = ["rt", "rt-multi-thread", "macros"] }
+
+[lints]
+workspace = true

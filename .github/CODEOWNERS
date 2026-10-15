@@ -1,0 +1,25 @@
+# Every change needs a code-owner review before it can merge into main.
+# The handle below is a placeholder until the repository is created. Replace it with the
+# maintainer's GitHub handle or team, then require code-owner review in the main ruleset.
+*                                   @berth-studio-maintainer
+
+# Paths that guard secrets, database access, the supply chain and releases.
+/.github/                           @berth-studio-maintainer
+/apps/desktop/src-tauri/            @berth-studio-maintainer
+/crates/berth-secrets/              @berth-studio-maintainer
+/crates/berth-postgres/             @berth-studio-maintainer
+/crates/berth-mongo/                @berth-studio-maintainer
+/Cargo.toml                         @berth-studio-maintainer
+/Cargo.lock                         @berth-studio-maintainer
+/package.json                       @berth-studio-maintainer
+/package-lock.json                  @berth-studio-maintainer
+/apps/desktop/package.json          @berth-studio-maintainer
+/.npmrc                             @berth-studio-maintainer
+/deny.toml                          @berth-studio-maintainer
+/rust-toolchain.toml                @berth-studio-maintainer
+/scripts/                           @berth-studio-maintainer
+/SECURITY.md                        @berth-studio-maintainer
+/docs/SECURITY.md                   @berth-studio-maintainer
+/docs/DEPENDENCIES.md               @berth-studio-maintainer
+/CLA.md                             @berth-studio-maintainer
+/LICENSE                            @berth-studio-maintainer

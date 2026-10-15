@@ -1,0 +1,105 @@
+# Runs on every pull request, including pull requests from forks.
+# Hardening:
+#   - `pull_request`, never `pull_request_target`: code from a fork never runs with this
+#     repository's token or secrets.
+#   - No secrets are used anywhere in this workflow, and the token can only read contents.
+#   - Actions are GitHub's own, pinned to full commit SHAs. Credentials are not persisted, and
+#     no caches are shared between pull requests.
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  merge_group:
+
+permissions: {}
+
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  npm_config_ignore_scripts: "true"
+
+jobs:
+  web:
+    name: Interface, prototype and npm supply chain
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          package-manager-cache: false
+      - run: npm ci --ignore-scripts
+      - run: npm audit
+      - run: npm audit signatures
+      - name: No package runs code at install time
+        run: test "$(npm query ':attr(scripts, [preinstall]), :attr(scripts, [install]), :attr(scripts, [postinstall])')" = "[]"
+      - run: npm test
+      - run: npm run build
+
+  rust:
+    name: Rust, desktop app, PostgreSQL and MongoDB tests (macOS)
+    runs-on: macos-15
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          package-manager-cache: false
+      - name: Build the interface (embedded into the app at compile time)
+        run: npm ci --ignore-scripts && npm run build
+      - name: Install the toolchain pinned in rust-toolchain.toml
+        run: rustup toolchain install
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: Start the throwaway PostgreSQL
+        run: |
+          brew install postgresql@16
+          PG_BIN="$(brew --prefix postgresql@16)/bin" scripts/dev-db/start.sh
+      - name: Start the throwaway MongoDB replica set
+        # MongoDB is not in homebrew/core. Homebrew loads formulae from a third-party tap only once they
+        # are trusted, so trust exactly the ones this install loads rather than the whole tap:
+        # the server, its database-tools dependency, and mongodb-enterprise, which is only read to
+        # check that the two do not conflict.
+        run: |
+          brew tap mongodb/brew
+          brew trust --formula mongodb/brew/mongodb-community@8.0
+          brew trust --formula mongodb/brew/mongodb-database-tools
+          brew trust --formula mongodb/brew/mongodb-enterprise
+          brew install mongodb/brew/mongodb-community@8.0
+          scripts/dev-db/mongo-start.sh
+      - run: cargo test --workspace --locked
+        env:
+          BERTH_TEST_PG: 127.0.0.1:54329
+          BERTH_TEST_MONGO: 127.0.0.1:54330
+
+  rust-supply-chain:
+    name: Rust supply chain
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install the toolchain pinned in rust-toolchain.toml
+        run: rustup toolchain install
+      - name: Install cargo-deny and cargo-audit from crates.io, with their own lockfiles
+        run: cargo install --locked cargo-deny@0.20.2 cargo-audit@0.22.2
+      - run: cargo deny check
+      - run: cargo audit

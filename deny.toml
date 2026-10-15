@@ -1,0 +1,56 @@
+# Supply-chain policy, checked by `cargo deny check` locally and in CI.
+# Every crate must come from crates.io, carry an Apache-2.0-compatible licence,
+# and have no open RustSec advisory. See docs/DEPENDENCIES.md for why each direct dependency exists.
+
+[graph]
+# macOS first. Add the Windows and Linux targets when those builds start, so their extra
+# dependencies get the same review.
+targets = ["aarch64-apple-darwin", "x86_64-apple-darwin"]
+all-features = false
+
+[advisories]
+# Vulnerabilities and unsound crates fail the check. An advisory may only be ignored here with
+# its id, a reason and a date to look again.
+ignore = []
+yanked = "deny"
+
+[licenses]
+confidence-threshold = 0.93
+allow = [
+  "Apache-2.0",
+  "Apache-2.0 WITH LLVM-exception",
+  "MIT",
+  "MIT-0",
+  "BSD-2-Clause",
+  "BSD-3-Clause",
+  "ISC",
+  "Zlib",
+  "Unicode-3.0",
+  "CDLA-Permissive-2.0",
+  "MPL-2.0",          # file-level copyleft only; we never modify MPL files
+]
+exceptions = [
+  # CC0-1.0 is a public-domain dedication, compatible with Apache-2.0. tiny-keccak is only used at
+  # compile time, by a macro inside the mongodb driver (via const-random), and is not linked into the app.
+  { allow = ["CC0-1.0"], crate = "tiny-keccak" },
+]
+
+[licenses.private]
+ignore = true       # our own unpublished workspace crates
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+allow-wildcard-paths = true
+highlight = "all"
+deny = [
+  # OpenSSL is not needed: TLS goes through rustls.
+  { name = "openssl-sys" },
+  { name = "openssl" },
+]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []
