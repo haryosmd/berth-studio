@@ -105,10 +105,10 @@ enum Tls {
 }
 
 /// Certificates are checked against the macOS trust store, including the host name. A PEM file
-/// at `ca_cert` adds roots to that store for this connection, which is what RDS needs: Amazon
-/// signs RDS certificates with its own CA, which no operating system ships.
+/// at `ca_cert` adds roots for this connection, which is what RDS needs: Amazon signs RDS
+/// certificates with its own CA, which no operating system ships.
 fn rustls_connector(ca_cert: Option<&str>) -> Result<tokio_postgres_rustls::MakeRustlsConnect, DbError> {
-    use rustls_platform_verifier::{BuilderVerifierExt, Verifier};
+    use rustls_platform_verifier::BuilderVerifierExt;
     let setup = |e: &dyn std::fmt::Display| DbError::msg(format!("TLS setup failed: {e}"));
     let provider = Arc::new(rustls::crypto::ring::default_provider());
     let builder =
@@ -116,13 +116,88 @@ fn rustls_connector(ca_cert: Option<&str>) -> Result<tokio_postgres_rustls::Make
     let config = match ca_cert.map(str::trim).filter(|p| !p.is_empty()) {
         None => builder.with_platform_verifier().map_err(|e| setup(&e))?,
         Some(path) => {
-            let verifier = Verifier::new_with_extra_roots(extra_roots(path)?, provider)
-                .map_err(|e| DbError::msg(format!("CA certificate {path}: {e}")))?;
+            let verifier =
+                ExtraRootsVerifier::new(extra_roots(path)?, provider).map_err(|e| DbError::msg(format!("CA certificate {path}: {e}")))?;
             builder.dangerous().with_custom_certificate_verifier(Arc::new(verifier))
         }
     }
     .with_no_client_auth();
     Ok(tokio_postgres_rustls::MakeRustlsConnect::new(config))
+}
+
+/// Checks a server certificate against the extra roots with webpki, and failing that against the
+/// macOS trust store. The extra roots cannot simply be handed to macOS: Apple's TLS policy
+/// rejects every server certificate without an Extended Key Usage extension, and Amazon RDS
+/// issues exactly those, so a chain to the RDS root fails there with `EkuError` even though the
+/// root is trusted. webpki follows RFC 5280, where a missing extension allows any use.
+#[derive(Debug)]
+struct ExtraRootsVerifier {
+    extra: Arc<rustls::client::WebPkiServerVerifier>,
+    platform: rustls_platform_verifier::Verifier,
+}
+
+impl ExtraRootsVerifier {
+    fn new(roots: Vec<rustls::pki_types::CertificateDer<'static>>, provider: Arc<rustls::crypto::CryptoProvider>) -> Result<Self, String> {
+        let mut store = rustls::RootCertStore::empty();
+        let (added, _) = store.add_parsable_certificates(roots);
+        if added == 0 {
+            return Err("no certificate in the file can act as a CA".into());
+        }
+        let extra = rustls::client::WebPkiServerVerifier::builder_with_provider(Arc::new(store), provider.clone())
+            .build()
+            .map_err(|e| e.to_string())?;
+        let platform = rustls_platform_verifier::Verifier::new(provider).map_err(|e| e.to_string())?;
+        Ok(ExtraRootsVerifier { extra, platform })
+    }
+}
+
+impl rustls::client::danger::ServerCertVerifier for ExtraRootsVerifier {
+    fn verify_server_cert(
+        &self,
+        end_entity: &rustls::pki_types::CertificateDer<'_>,
+        intermediates: &[rustls::pki_types::CertificateDer<'_>],
+        server_name: &rustls::pki_types::ServerName<'_>,
+        ocsp_response: &[u8],
+        now: rustls::pki_types::UnixTime,
+    ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
+        let extra = match self.extra.verify_server_cert(end_entity, intermediates, server_name, ocsp_response, now) {
+            Ok(ok) => return Ok(ok),
+            Err(e) => e,
+        };
+        let platform = match self.platform.verify_server_cert(end_entity, intermediates, server_name, ocsp_response, now) {
+            Ok(ok) => return Ok(ok),
+            Err(e) => e,
+        };
+        // A certificate that does not chain to the extra roots at all is the system store's
+        // business, so its verdict is the one to show; anything else (wrong host name, expired)
+        // was found on the chain the user configured.
+        Err(match extra {
+            rustls::Error::InvalidCertificate(rustls::CertificateError::UnknownIssuer) => platform,
+            other => other,
+        })
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        message: &[u8],
+        cert: &rustls::pki_types::CertificateDer<'_>,
+        dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        self.extra.verify_tls12_signature(message, cert, dss)
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        cert: &rustls::pki_types::CertificateDer<'_>,
+        dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        self.extra.verify_tls13_signature(message, cert, dss)
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+        self.extra.supported_verify_schemes()
+    }
 }
 
 /// A handshake that fails with `UnknownIssuer` while no CA file is set is almost always a managed
@@ -443,6 +518,58 @@ mod tests {
         assert_eq!(chain(&outer), "invalid peer certificate: UnknownIssuer");
         assert_eq!(chain(&io::Error::other("alone")), "alone");
     }
+
+    /// A root from the CA file must vouch for a server certificate that has no Extended Key
+    /// Usage extension, as every Amazon RDS certificate is; macOS alone refuses those.
+    #[test]
+    fn a_ca_file_root_vouches_for_a_server_certificate_without_eku() {
+        use rustls::client::danger::ServerCertVerifier;
+        use rustls::pki_types::{pem::PemObject, CertificateDer, ServerName, UnixTime};
+        let root = CertificateDer::from_pem_slice(TEST_ROOT.as_bytes()).unwrap();
+        let leaf = CertificateDer::from_pem_slice(TEST_LEAF_NO_EKU.as_bytes()).unwrap();
+        let verifier = ExtraRootsVerifier::new(vec![root], Arc::new(rustls::crypto::ring::default_provider())).unwrap();
+        let verify =
+            |host: &str| verifier.verify_server_cert(&leaf, &[], &ServerName::try_from(host.to_string()).unwrap(), &[], UnixTime::now());
+        assert!(verify("db.example.test").is_ok());
+        // The chain is the user's, so its own verdict shows, not the system store's.
+        assert!(
+            matches!(
+                verify("other.example.test"),
+                Err(rustls::Error::InvalidCertificate(rustls::CertificateError::NotValidForNameContext { .. }))
+            ),
+            "{:?}",
+            verify("other.example.test")
+        );
+        // A certificate that chains to neither is refused by both.
+        let stranger = CertificateDer::from_pem_slice(TEST_CA.as_bytes()).unwrap();
+        assert!(verifier
+            .verify_server_cert(&stranger, &[], &ServerName::try_from("db.example.test").unwrap(), &[], UnixTime::now())
+            .is_err());
+    }
+
+    /// A test root and a server certificate it signed for `db.example.test` without an Extended
+    /// Key Usage extension. Both keys were discarded; they sign nothing real.
+    const TEST_ROOT: &str = "-----BEGIN CERTIFICATE-----\n\
+MIIBhzCCASygAwIBAgIUT6isvV0EWP8QbXr9hKStOvZY69YwCgYIKoZIzj0EAwIw\n\
+ITEfMB0GA1UEAwwWQmVydGggU3R1ZGlvIHRlc3Qgcm9vdDAeFw0yNjEwMTYwNjA5\n\
+MjBaFw0zNjEwMTMwNjA5MjBaMCExHzAdBgNVBAMMFkJlcnRoIFN0dWRpbyB0ZXN0\n\
+IHJvb3QwWTATBgcqhkjOPQIBBggqhkjOPQMBBwNCAASgGDj8vU+qKxMATZRO/hCL\n\
+h8cuz/3mzXOpNVbdC4GV6jnG0JJnJ5e+Q3VUtxffGnDBWKriaKqWxXZFTJ59FRQO\n\
+o0IwQDAdBgNVHQ4EFgQU7ZrY4ht+ed57LYBd7Ljde0fTwKQwDwYDVR0TAQH/BAUw\n\
+AwEB/zAOBgNVHQ8BAf8EBAMCAQYwCgYIKoZIzj0EAwIDSQAwRgIhANEKzXrDIooc\n\
+iahR2lHXNCVuOeK1O3JVjnJNLMIPtHbXAiEAxR0FivLNzj7BPX/i1/l/BbrNYdxm\n\
+omvWR8LffzdGVeg=\n\
+-----END CERTIFICATE-----\n";
+    const TEST_LEAF_NO_EKU: &str = "-----BEGIN CERTIFICATE-----\n\
+MIIBdDCCARmgAwIBAgIUbAAvGf+zaZAa2rvz4geMnaxp/0AwCgYIKoZIzj0EAwIw\n\
+ITEfMB0GA1UEAwwWQmVydGggU3R1ZGlvIHRlc3Qgcm9vdDAeFw0yNjEwMTYwNjA5\n\
+MjBaFw0zNjEwMTMwNjA5MjBaMBoxGDAWBgNVBAMMD2RiLmV4YW1wbGUudGVzdDBZ\n\
+MBMGByqGSM49AgEGCCqGSM49AwEHA0IABCPLWW0Dz6n6uKDpClOy3fU8rNOqkiD4\n\
+pQEeQbn/BB8LQRuIU1J/8wAk6/Y7mM0GW991ZNG6JPUZMbmvXHHNta2jNjA0MAkG\n\
+A1UdEwQCMAAwGgYDVR0RBBMwEYIPZGIuZXhhbXBsZS50ZXN0MAsGA1UdDwQEAwIH\n\
+gDAKBggqhkjOPQQDAgNJADBGAiEA54Mw+5+QdHV2hjba0it7VxUmu6GXrCGqFqUa\n\
+ujgJ0tsCIQDx0848+R6BAEltUYcJJ8FyKEPCPYOE7DDEpm62d5QB2w==\n\
+-----END CERTIFICATE-----\n";
 
     /// A self-signed certificate made for this test; it signs nothing real.
     const TEST_CA: &str = "-----BEGIN CERTIFICATE-----\n\
