@@ -66,13 +66,17 @@ npm run tauri dev
 
 ### Connect to a database in the cloud
 
-Managed databases such as Amazon RDS and Aurora, Azure Database, Google Cloud SQL or DigitalOcean sign their server certificates with the provider's own CA, which macOS doesn't trust out of the box. Berth Studio checks the certificate anyway, so the connection test fails with `invalid peer certificate: UnknownIssuer` until you give it the provider's CA.
+Managed databases such as Amazon RDS and Aurora, Azure Database, Google Cloud SQL or DigitalOcean sign their server certificates with the provider's own CA, which macOS doesn't trust out of the box. Berth Studio checks the certificate anyway.
+
+**Amazon RDS and Aurora work out of the box.** Berth Studio ships the [RDS root certificates](https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/UsingWithRDS.SSL.html) and trusts them for hosts under `rds.amazonaws.com` and `rds.amazonaws.com.cn` only, so leave the **CA certificate** field empty. Should Amazon add a root this version doesn't know yet, the connection test says so, and your region's bundle in that field tides you over until the next release.
+
+For other providers, and for a server with a self-signed certificate, the connection test fails with `invalid peer certificate: UnknownIssuer` until you give Berth Studio the CA:
 
 1. Download the CA certificate (a `.pem` file) from your provider. It's usually on the database's connection page, called "CA certificate", "root certificate" or "SSL certificate":
-   - **Amazon RDS and Aurora:** one bundle per region, or the global bundle, from the [RDS trust store](https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/UsingWithRDS.SSL.html).
    - **Azure Database for PostgreSQL:** the root certificates listed in the [TLS docs](https://learn.microsoft.com/azure/postgresql/flexible-server/concepts-networking-ssl-tls).
    - **Google Cloud SQL:** the server CA on the instance's **Connections** page, see [the docs](https://cloud.google.com/sql/docs/postgres/configure-ssl-instance).
    - **DigitalOcean:** the CA certificate on the database's **Overview** page, see [the docs](https://docs.digitalocean.com/products/databases/postgresql/how-to/connect/).
+   - **A self-signed server:** the certificate of the CA that signed it, from whoever runs the server.
 2. In the connection sheet of a PostgreSQL connection, put the file's path into the **CA certificate** field of that environment's profile. A path may start with `~`.
 3. Click **Test**. The file is read on every connection, so keep it where it is.
 

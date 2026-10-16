@@ -66,13 +66,17 @@ npm run tauri dev
 
 ### Подключиться к базе в облаке
 
-Управляемые базы вроде Amazon RDS и Aurora, Azure Database, Google Cloud SQL или DigitalOcean подписывают серверные сертификаты собственным CA провайдера, которому macOS по умолчанию не доверяет. Berth Studio всё равно проверяет сертификат, поэтому тест подключения падает с `invalid peer certificate: UnknownIssuer`, пока вы не укажете CA провайдера.
+Управляемые базы вроде Amazon RDS и Aurora, Azure Database, Google Cloud SQL или DigitalOcean подписывают серверные сертификаты собственным CA провайдера, которому macOS по умолчанию не доверяет. Berth Studio всё равно проверяет сертификат.
+
+**Amazon RDS и Aurora работают сразу.** Berth Studio поставляется с [корневыми сертификатами RDS](https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/UsingWithRDS.SSL.html) и доверяет им только для хостов под `rds.amazonaws.com` и `rds.amazonaws.com.cn`, так что поле **CA certificate** оставьте пустым. Если Amazon добавит корень, которого эта версия ещё не знает, тест подключения об этом скажет, а бандл вашего региона в этом поле выручит до следующего релиза.
+
+Для других провайдеров и для сервера с самоподписанным сертификатом тест подключения падает с `invalid peer certificate: UnknownIssuer`, пока вы не передадите Berth Studio его CA:
 
 1. Скачайте сертификат CA (файл `.pem`) у провайдера. Обычно он лежит на странице подключения к базе и называется «CA certificate», «root certificate» или «SSL certificate»:
-   - **Amazon RDS и Aurora:** по одному бандлу на регион или глобальный бандл из [хранилища доверия RDS](https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/UsingWithRDS.SSL.html).
    - **Azure Database for PostgreSQL:** корневые сертификаты из [документации по TLS](https://learn.microsoft.com/azure/postgresql/flexible-server/concepts-networking-ssl-tls).
    - **Google Cloud SQL:** серверный CA на странице **Connections** инстанса, см. [документацию](https://cloud.google.com/sql/docs/postgres/configure-ssl-instance).
    - **DigitalOcean:** сертификат CA на странице **Overview** базы, см. [документацию](https://docs.digitalocean.com/products/databases/postgresql/how-to/connect/).
+   - **Самоподписанный сервер:** сертификат CA, который его подписал, от того, кто этим сервером управляет.
 2. В форме подключения PostgreSQL укажите путь к файлу в поле **CA certificate** профиля нужного окружения. Путь может начинаться с `~`.
 3. Нажмите **Test**. Файл читается при каждом подключении, так что не переносите его.
 

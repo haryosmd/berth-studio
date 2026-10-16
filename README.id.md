@@ -66,13 +66,17 @@ npm run tauri dev
 
 ### Hubungkan ke database di cloud
 
-Database terkelola seperti Amazon RDS dan Aurora, Azure Database, Google Cloud SQL, atau DigitalOcean menandatangani sertifikat servernya dengan CA milik penyedia, yang nggak dipercaya macOS secara bawaan. Berth Studio tetap memeriksa sertifikatnya, jadi tes koneksi gagal dengan `invalid peer certificate: UnknownIssuer` sampai kamu kasih CA penyedianya.
+Database terkelola seperti Amazon RDS dan Aurora, Azure Database, Google Cloud SQL, atau DigitalOcean menandatangani sertifikat servernya dengan CA milik penyedia, yang nggak dipercaya macOS secara bawaan. Berth Studio tetap memeriksa sertifikatnya.
+
+**Amazon RDS dan Aurora langsung jalan.** Berth Studio sudah membawa [sertifikat root RDS](https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/UsingWithRDS.SSL.html) dan hanya mempercayainya untuk host di bawah `rds.amazonaws.com` dan `rds.amazonaws.com.cn`, jadi biarkan kolom **CA certificate** kosong. Kalau Amazon menambah root yang belum dikenal versi ini, tes koneksi bakal bilang begitu, dan bundle region kamu di kolom itu cukup sampai rilis berikutnya.
+
+Untuk penyedia lain, dan untuk server dengan sertifikat self-signed, tes koneksi gagal dengan `invalid peer certificate: UnknownIssuer` sampai kamu kasih CA-nya ke Berth Studio:
 
 1. Unduh sertifikat CA (file `.pem`) dari penyedia kamu. Biasanya ada di halaman koneksi database-nya, dengan nama "CA certificate", "root certificate", atau "SSL certificate":
-   - **Amazon RDS dan Aurora:** satu bundle per region, atau bundle global, dari [RDS trust store](https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/UsingWithRDS.SSL.html).
    - **Azure Database for PostgreSQL:** root certificate yang tercantum di [dokumentasi TLS](https://learn.microsoft.com/azure/postgresql/flexible-server/concepts-networking-ssl-tls).
    - **Google Cloud SQL:** server CA di halaman **Connections** instance-nya, lihat [dokumentasinya](https://cloud.google.com/sql/docs/postgres/configure-ssl-instance).
    - **DigitalOcean:** CA certificate di halaman **Overview** database-nya, lihat [dokumentasinya](https://docs.digitalocean.com/products/databases/postgresql/how-to/connect/).
+   - **Server self-signed:** sertifikat CA yang menandatanganinya, dari siapa pun yang mengelola servernya.
 2. Di lembar koneksi PostgreSQL, isi path file-nya ke kolom **CA certificate** di profil environment itu. Path boleh diawali `~`.
 3. Klik **Test**. File-nya dibaca setiap kali tersambung, jadi biarkan di tempatnya.
 

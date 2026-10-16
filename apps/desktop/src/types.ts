@@ -31,7 +31,7 @@ export interface Endpoint {
   /** MongoDB only: the database the user is defined in. */
   authSource?: string;
   tls: TlsMode;
-  /** PostgreSQL only: path to a PEM file with extra CA certificates, such as the Amazon RDS bundle. */
+  /** PostgreSQL only: path to a PEM file with extra CA certificates. Amazon RDS roots are built in. */
   caCert?: string;
   /** A keychain reference such as keychain://berth-studio/acme-db/dev/write-0. Never the password. */
   secret?: string | null;
