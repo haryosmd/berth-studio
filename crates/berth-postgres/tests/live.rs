@@ -3,9 +3,10 @@
 //! Without BERTH_TEST_PG every test returns early, so `cargo test` works with no database.
 //!
 //! The TLS test instead needs a server signed by a CA the system does not trust, such as any
-//! Amazon RDS instance, plus its CA bundle. It never needs the password:
+//! Amazon RDS instance, and optionally its CA bundle. It never needs the password:
 //!     BERTH_TEST_TLS_HOST=db.xyz.ap-southeast-1.rds.amazonaws.com \
 //!     BERTH_TEST_TLS_CA=~/Downloads/ap-southeast-1-bundle.pem cargo test -p berth-postgres
+//! An RDS host must also get past TLS with no bundle at all, since its roots ship in the crate.
 
 use berth_core::{Endpoint, Role, TlsMode};
 use berth_postgres::{Session, Target, MAX_ROWS};
@@ -107,10 +108,12 @@ async fn long_queries_time_out_and_can_be_cancelled() {
 }
 
 /// The handshake must succeed with the CA file, so the only error left is the server refusing
-/// the made-up password. Without the CA file it must fail in TLS instead.
+/// the made-up password. Without the CA file it must fail in TLS instead, unless the host is an
+/// Amazon RDS one: those get the built-in roots and must reach the password check as well.
 #[tokio::test(flavor = "current_thread")]
 async fn tls_trusts_the_ca_file_besides_the_system_store() {
-    let (Ok(host), Ok(ca)) = (std::env::var("BERTH_TEST_TLS_HOST"), std::env::var("BERTH_TEST_TLS_CA")) else { return };
+    let Ok(host) = std::env::var("BERTH_TEST_TLS_HOST") else { return };
+    let ca = std::env::var("BERTH_TEST_TLS_CA").ok();
     let ep = |ca_cert: Option<String>| Endpoint {
         role: Role::Write,
         host: host.clone(),
@@ -124,10 +127,20 @@ async fn tls_trusts_the_ca_file_besides_the_system_store() {
         secret: None,
         needs_secret: true,
     };
-    let err = Session::connect(&Target::new(ep(Some(ca)), true), Some("not-the-password")).await.err().expect("an error");
-    assert!(err.code.is_some() || err.message.contains("password"), "expected a server-side refusal, got: {}", err.message);
-    assert!(!err.message.contains("TLS"), "{}", err.message);
+    let refused_by_the_server = |err: &berth_postgres::DbError| {
+        assert!(err.code.is_some() || err.message.contains("password"), "expected a server-side refusal, got: {}", err.message);
+        assert!(!err.message.contains("TLS"), "{}", err.message);
+    };
+    if let Some(ca) = ca {
+        let err = Session::connect(&Target::new(ep(Some(ca)), true), Some("not-the-password")).await.err().expect("an error");
+        refused_by_the_server(&err);
+    }
 
     let err = Session::connect(&Target::new(ep(None), true), Some("not-the-password")).await.err().expect("an error");
-    assert!(err.message.contains("UnknownIssuer") && err.message.contains("CA certificate"), "{}", err.message);
+    let rds = host.trim().trim_end_matches('.').to_ascii_lowercase();
+    if rds.ends_with(".rds.amazonaws.com") || rds.ends_with(".rds.amazonaws.com.cn") {
+        refused_by_the_server(&err);
+    } else {
+        assert!(err.message.contains("UnknownIssuer") && err.message.contains("CA certificate"), "{}", err.message);
+    }
 }

@@ -66,13 +66,17 @@ npm run tauri dev
 
 ### クラウドのデータベースに接続する
 
-Amazon RDS や Aurora、Azure Database、Google Cloud SQL、DigitalOcean などのマネージドデータベースは、サーバー証明書をプロバイダー独自の CA で署名しており、macOS は標準ではそれを信頼しません。Berth Studio は証明書をきちんと検証するので、プロバイダーの CA を渡すまで接続テストは `invalid peer certificate: UnknownIssuer` で失敗します。
+Amazon RDS や Aurora、Azure Database、Google Cloud SQL、DigitalOcean などのマネージドデータベースは、サーバー証明書をプロバイダー独自の CA で署名しており、macOS は標準ではそれを信頼しません。Berth Studio は証明書をきちんと検証します。
+
+**Amazon RDS と Aurora はそのまま接続できます。** Berth Studio は [RDS のルート証明書](https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/UsingWithRDS.SSL.html)を同梱しており、`rds.amazonaws.com` と `rds.amazonaws.com.cn` 配下のホストに限ってそれを信頼するので、**CA certificate** 欄は空のままにしてください。このバージョンがまだ知らないルートを Amazon が追加した場合は接続テストがそう伝えるので、次のリリースまではお使いのリージョンのバンドルをその欄に入れてしのげます。
+
+ほかのプロバイダーや自己署名証明書のサーバーでは、CA を Berth Studio に渡すまで接続テストは `invalid peer certificate: UnknownIssuer` で失敗します。
 
 1. プロバイダーから CA 証明書（`.pem` ファイル）をダウンロードします。たいていはデータベースの接続ページにあり、「CA certificate」「root certificate」「SSL certificate」などと呼ばれています。
-   - **Amazon RDS と Aurora：** リージョンごとのバンドル、またはグローバルバンドルを [RDS のトラストストア](https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/UsingWithRDS.SSL.html)から。
    - **Azure Database for PostgreSQL：** [TLS のドキュメント](https://learn.microsoft.com/azure/postgresql/flexible-server/concepts-networking-ssl-tls)に載っているルート証明書。
    - **Google Cloud SQL：** インスタンスの**接続**ページにあるサーバー CA。[ドキュメント](https://cloud.google.com/sql/docs/postgres/configure-ssl-instance)を参照。
    - **DigitalOcean：** データベースの**概要**ページにある CA 証明書。[ドキュメント](https://docs.digitalocean.com/products/databases/postgresql/how-to/connect/)を参照。
+   - **自己署名のサーバー：** その証明書に署名した CA の証明書。サーバーを運用している人から受け取ってください。
 2. PostgreSQL 接続の接続シートで、その環境のプロファイルにある **CA certificate** 欄にファイルのパスを入力します。パスは `~` で始めても構いません。
 3. **Test** をクリックします。ファイルは接続のたびに読み込まれるので、その場所に置いたままにしてください。
 

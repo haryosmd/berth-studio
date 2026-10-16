@@ -179,7 +179,7 @@ export function ConnectionSheet({ existing, startEnv, environments, onClose, onS
                     {passwordField(i, e)}
                   </div>
                   {e.tls !== 'disable' && (
-                    <label className="field"><span>CA certificate, optional: a PEM file trusted besides the system store, such as the Amazon RDS bundle</span>
+                    <label className="field"><span>CA certificate, optional: a PEM file trusted besides the system store. Amazon RDS and Aurora need none, their roots are built in</span>
                       <input className="input mono" value={e.caCert ?? ''} placeholder="None: only the system trust store" spellCheck={false}
                         onChange={x => setEp(i, { caCert: x.target.value || undefined })} />
                     </label>

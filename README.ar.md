@@ -68,13 +68,17 @@ npm run tauri dev
 
 ### الاتصال بقاعدة بيانات في السحابة
 
-قواعد البيانات المُدارة مثل Amazon RDS وAurora وAzure Database وGoogle Cloud SQL وDigitalOcean توقّع شهادات خوادمها بسلطة شهادات (CA) خاصة بالمزوّد، ولا يثق بها macOS افتراضيًا. يتحقق Berth Studio من الشهادة على أي حال، لذا يفشل اختبار الاتصال برسالة `invalid peer certificate: UnknownIssuer` إلى أن تزوّده بشهادة CA الخاصة بالمزوّد.
+قواعد البيانات المُدارة مثل Amazon RDS وAurora وAzure Database وGoogle Cloud SQL وDigitalOcean توقّع شهادات خوادمها بسلطة شهادات (CA) خاصة بالمزوّد، ولا يثق بها macOS افتراضيًا. يتحقق Berth Studio من الشهادة على أي حال.
+
+**Amazon RDS وAurora يعملان مباشرةً.** يأتي Berth Studio مزوّدًا بـ[الشهادات الجذرية لـ RDS](https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/UsingWithRDS.SSL.html) ولا يثق بها إلا للمضيفين تحت `rds.amazonaws.com` و`rds.amazonaws.com.cn`، لذا اترك حقل **CA certificate** فارغًا. وإن أضافت Amazon شهادة جذرية لا يعرفها هذا الإصدار بعد، فسيخبرك اختبار الاتصال بذلك، وتكفيك حزمة منطقتك في ذلك الحقل حتى الإصدار التالي.
+
+أما المزوّدون الآخرون، والخوادم ذات الشهادات الموقّعة ذاتيًا، فيفشل اختبار الاتصال معها برسالة `invalid peer certificate: UnknownIssuer` إلى أن تزوّد Berth Studio بشهادة CA:
 
 1. نزّل شهادة CA (ملف `.pem`) من مزوّدك. تجدها عادةً في صفحة الاتصال بقاعدة البيانات باسم "CA certificate" أو "root certificate" أو "SSL certificate":
-   - **Amazon RDS وAurora:** حزمة لكل منطقة، أو الحزمة العالمية، من [مخزن الثقة الخاص بـ RDS](https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/UsingWithRDS.SSL.html).
    - **Azure Database for PostgreSQL:** الشهادات الجذرية المذكورة في [وثائق TLS](https://learn.microsoft.com/azure/postgresql/flexible-server/concepts-networking-ssl-tls).
    - **Google Cloud SQL:** شهادة CA الخاصة بالخادم في صفحة **Connections** للمثيل، انظر [الوثائق](https://cloud.google.com/sql/docs/postgres/configure-ssl-instance).
    - **DigitalOcean:** شهادة CA في صفحة **Overview** لقاعدة البيانات، انظر [الوثائق](https://docs.digitalocean.com/products/databases/postgresql/how-to/connect/).
+   - **خادم بشهادة موقّعة ذاتيًا:** شهادة سلطة الشهادات التي وقّعتها، تحصل عليها ممّن يدير الخادم.
 2. في نافذة اتصال PostgreSQL، ضع مسار الملف في حقل **CA certificate** ضمن ملف تعريف تلك البيئة. يمكن أن يبدأ المسار بـ `~`.
 3. اضغط **Test**. يُقرأ الملف عند كل اتصال، فاتركه في مكانه.
 

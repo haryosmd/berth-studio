@@ -7,7 +7,7 @@
 
 use berth_core::{Endpoint, TlsMode};
 use serde::Serialize;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 use tokio_postgres::{CancelToken, Client, NoTls, SimpleQueryMessage};
 
@@ -104,25 +104,69 @@ enum Tls {
     Rustls(tokio_postgres_rustls::MakeRustlsConnect),
 }
 
-/// Certificates are checked against the macOS trust store, including the host name. A PEM file
-/// at `ca_cert` adds roots for this connection, which is what RDS needs: Amazon signs RDS
-/// certificates with its own CA, which no operating system ships.
-fn rustls_connector(ca_cert: Option<&str>) -> Result<tokio_postgres_rustls::MakeRustlsConnect, DbError> {
+/// Certificates are checked against the macOS trust store, including the host name. Extra roots
+/// add to it for one connection: the built-in Amazon RDS roots when `host` is an RDS endpoint,
+/// and the PEM file at `ca_cert`. Amazon signs RDS certificates with its own CA, which no
+/// operating system ships, so without the built-in roots every RDS user had to download a bundle.
+fn rustls_connector(host: &str, ca_cert: Option<&str>) -> Result<tokio_postgres_rustls::MakeRustlsConnect, DbError> {
     use rustls_platform_verifier::BuilderVerifierExt;
     let setup = |e: &dyn std::fmt::Display| DbError::msg(format!("TLS setup failed: {e}"));
     let provider = Arc::new(rustls::crypto::ring::default_provider());
     let builder =
         rustls::ClientConfig::builder_with_provider(provider.clone()).with_safe_default_protocol_versions().map_err(|e| setup(&e))?;
-    let config = match ca_cert.map(str::trim).filter(|p| !p.is_empty()) {
-        None => builder.with_platform_verifier().map_err(|e| setup(&e))?,
-        Some(path) => {
-            let verifier =
-                ExtraRootsVerifier::new(extra_roots(path)?, provider).map_err(|e| DbError::msg(format!("CA certificate {path}: {e}")))?;
-            builder.dangerous().with_custom_certificate_verifier(Arc::new(verifier))
-        }
+    let roots = trusted_extra_roots(host, ca_cert)?;
+    let config = if roots.is_empty() {
+        builder.with_platform_verifier().map_err(|e| setup(&e))?
+    } else {
+        let source = match ca_file(ca_cert) {
+            Some(path) => format!("CA certificate {path}"),
+            None => "built-in Amazon RDS roots".into(),
+        };
+        let verifier = ExtraRootsVerifier::new(roots, provider).map_err(|e| DbError::msg(format!("{source}: {e}")))?;
+        builder.dangerous().with_custom_certificate_verifier(Arc::new(verifier))
     }
     .with_no_client_auth();
     Ok(tokio_postgres_rustls::MakeRustlsConnect::new(config))
+}
+
+/// The CA file path a profile set, if any; blank means none.
+fn ca_file(ca_cert: Option<&str>) -> Option<&str> {
+    ca_cert.map(str::trim).filter(|p| !p.is_empty())
+}
+
+/// The roots trusted besides the system store for a connection to `host`: the built-in Amazon RDS
+/// roots for an RDS host, plus every certificate of the CA file when one is set. Any other host
+/// without a CA file gets none, so the RDS roots never vouch for a server elsewhere.
+fn trusted_extra_roots(host: &str, ca_cert: Option<&str>) -> Result<Vec<rustls::pki_types::CertificateDer<'static>>, DbError> {
+    let mut roots = Vec::new();
+    if is_rds_host(host) {
+        roots.extend(rds_roots().iter().cloned());
+    }
+    if let Some(path) = ca_file(ca_cert) {
+        roots.extend(extra_roots(path)?);
+    }
+    Ok(roots)
+}
+
+/// Whether `host` is an Amazon RDS or Aurora endpoint, told by its DNS suffix alone and never by
+/// the certificate the server presents. A trailing dot names the same host.
+fn is_rds_host(host: &str) -> bool {
+    let host = host.trim().trim_end_matches('.').to_ascii_lowercase();
+    host.ends_with(".rds.amazonaws.com") || host.ends_with(".rds.amazonaws.com.cn")
+}
+
+/// Amazon's global CA bundle for RDS and Aurora; `certs/README.md` records where it came from and
+/// how to refresh it.
+const RDS_GLOBAL_BUNDLE: &str = include_str!("../certs/rds-global-bundle.pem");
+
+/// The bundle's certificates, parsed once for the whole process. A certificate rustls cannot read
+/// is skipped; the unit test checks that none is.
+fn rds_roots() -> &'static [rustls::pki_types::CertificateDer<'static>] {
+    static ROOTS: OnceLock<Vec<rustls::pki_types::CertificateDer<'static>>> = OnceLock::new();
+    ROOTS.get_or_init(|| {
+        use rustls::pki_types::{pem::PemObject, CertificateDer};
+        CertificateDer::pem_slice_iter(RDS_GLOBAL_BUNDLE.as_bytes()).filter_map(Result::ok).collect()
+    })
 }
 
 /// Checks a server certificate against the extra roots with webpki, and failing that against the
@@ -201,17 +245,21 @@ impl rustls::client::danger::ServerCertVerifier for ExtraRootsVerifier {
 }
 
 /// A handshake that fails with `UnknownIssuer` while no CA file is set is almost always a managed
-/// database signed by a CA no operating system ships, such as Amazon RDS. Bare "UnknownIssuer"
-/// reads like a bug, so the message says what to do.
-fn explain_unknown_issuer(mut err: DbError, ca_cert: Option<&str>) -> DbError {
-    let has_ca = ca_cert.map(str::trim).is_some_and(|p| !p.is_empty());
-    if !has_ca && err.message.contains("UnknownIssuer") {
-        err.message.push_str(
-            ". The system trust store does not know the CA that signed this server's certificate; \
-             set its PEM file as the CA certificate. Amazon RDS publishes one per region at \
-             https://truststore.pki.rds.amazonaws.com/",
-        );
+/// database signed by a CA no operating system ships. Bare "UnknownIssuer" reads like a bug, so
+/// the message says what to do. An RDS host already had the built-in roots, so there the shipped
+/// bundle is behind Amazon's, and the region's own bundle is the stopgap.
+fn explain_unknown_issuer(mut err: DbError, host: &str, ca_cert: Option<&str>) -> DbError {
+    if ca_file(ca_cert).is_some() || !err.message.contains("UnknownIssuer") {
+        return err;
     }
+    err.message.push_str(if is_rds_host(host) {
+        ". The Amazon RDS root certificates built into this version do not cover this server's \
+         certificate; until the next release, set your region's bundle from \
+         https://truststore.pki.rds.amazonaws.com/ as the CA certificate"
+    } else {
+        ". The system trust store does not know the CA that signed this server's certificate; \
+         download the CA from your provider and set its PEM file as the CA certificate"
+    });
     err
 }
 
@@ -284,7 +332,7 @@ impl Session {
         }
         let tls = if target.uses_tls() {
             cfg.ssl_mode(tokio_postgres::config::SslMode::Require);
-            Tls::Rustls(rustls_connector(e.ca_cert.as_deref())?)
+            Tls::Rustls(rustls_connector(&e.host, e.ca_cert.as_deref())?)
         } else {
             cfg.ssl_mode(tokio_postgres::config::SslMode::Disable);
             Tls::None
@@ -297,7 +345,7 @@ impl Session {
             }
             Tls::Rustls(m) => {
                 let (client, conn) =
-                    cfg.connect(m.clone()).await.map_err(|err| explain_unknown_issuer(err.into(), e.ca_cert.as_deref()))?;
+                    cfg.connect(m.clone()).await.map_err(|err| explain_unknown_issuer(err.into(), &e.host, e.ca_cert.as_deref()))?;
                 tokio::spawn(conn);
                 client
             }
@@ -475,8 +523,71 @@ mod tests {
 
     #[test]
     fn the_tls_connector_builds_with_the_platform_verifier() {
-        assert!(rustls_connector(None).is_ok());
-        assert!(rustls_connector(Some("  ")).is_ok());
+        assert!(rustls_connector("db.acme.io", None).is_ok());
+        assert!(rustls_connector("db.acme.io", Some("  ")).is_ok());
+        assert!(rustls_connector("db.abc.us-east-1.rds.amazonaws.com", None).is_ok());
+    }
+
+    #[test]
+    fn rds_hosts_are_told_by_their_suffix_alone() {
+        for host in [
+            "db.abc123.ap-southeast-1.rds.amazonaws.com",
+            "aurora-cluster.cluster-abc.eu-west-1.rds.amazonaws.com",
+            "DB.ABC.US-EAST-1.RDS.AMAZONAWS.COM",
+            "  db.abc.us-east-1.rds.amazonaws.com\n",
+            "db.abc.us-east-1.rds.amazonaws.com.",
+            "db.abc.cn-north-1.rds.amazonaws.com.cn",
+            "db.abc.cn-north-1.RDS.amazonaws.com.CN.",
+        ] {
+            assert!(is_rds_host(host), "{host:?}");
+        }
+        for host in [
+            "",
+            "localhost",
+            "db.acme.io",
+            "rds.amazonaws.com",
+            "notrds.amazonaws.com",
+            "db.abc.us-east-1.rds.amazonaws.com.evil.test",
+            "db.abc.us-east-1.rds.amazonaws.com.cn.evil.test",
+            "db.abc.us-east-1.rds.amazonaws.co",
+            "db.abc.us-east-1.rds.amazonaws.com.c",
+            "rds.amazonaws.com.db.acme.io",
+            "db.rds-amazonaws.com",
+        ] {
+            assert!(!is_rds_host(host), "{host:?}");
+        }
+    }
+
+    /// Every certificate in the shipped bundle must parse and act as a CA, and the bundle must
+    /// reach RDS hosts only: elsewhere the system store alone decides, CA file or not.
+    #[test]
+    fn the_built_in_rds_roots_parse_and_reach_rds_hosts_only() {
+        use rustls::client::danger::ServerCertVerifier;
+        use rustls::pki_types::{pem::PemObject, CertificateDer, ServerName, UnixTime};
+        let in_bundle = RDS_GLOBAL_BUNDLE.matches("-----BEGIN CERTIFICATE-----").count();
+        assert!(in_bundle > 0);
+        assert_eq!(rds_roots().len(), in_bundle);
+        let provider = Arc::new(rustls::crypto::ring::default_provider());
+        assert!(ExtraRootsVerifier::new(rds_roots().to_vec(), provider.clone()).is_ok());
+
+        let rds = "db.abc.ap-southeast-1.rds.amazonaws.com";
+        assert!(trusted_extra_roots("db.acme.io", None).unwrap().is_empty());
+        assert!(trusted_extra_roots("db.acme.io", Some(" ")).unwrap().is_empty());
+        assert_eq!(trusted_extra_roots(rds, None).unwrap().len(), in_bundle);
+
+        let dir = std::env::temp_dir().join(format!("berth-rds-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("root.pem");
+        std::fs::write(&file, TEST_ROOT).unwrap();
+        let path = file.to_str().unwrap();
+        assert_eq!(trusted_extra_roots("db.acme.io", Some(path)).unwrap().len(), 1);
+        let merged = trusted_extra_roots(rds, Some(path)).unwrap();
+        assert_eq!(merged.len(), in_bundle + 1);
+        // The CA file's root still vouches next to the built-in ones.
+        let verifier = ExtraRootsVerifier::new(merged, provider).unwrap();
+        let leaf = CertificateDer::from_pem_slice(TEST_LEAF_NO_EKU.as_bytes()).unwrap();
+        assert!(verifier.verify_server_cert(&leaf, &[], &ServerName::try_from("db.example.test").unwrap(), &[], UnixTime::now()).is_ok());
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
@@ -485,15 +596,18 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let ok = dir.join("ca.pem");
         std::fs::write(&ok, TEST_CA).unwrap();
-        assert!(rustls_connector(Some(ok.to_str().unwrap())).is_ok());
+        assert!(rustls_connector("db.acme.io", Some(ok.to_str().unwrap())).is_ok());
 
         let empty = dir.join("empty.pem");
         std::fs::write(&empty, "just text\n").unwrap();
-        let e = rustls_connector(Some(empty.to_str().unwrap())).err().expect("an error");
+        let e = rustls_connector("db.acme.io", Some(empty.to_str().unwrap())).err().expect("an error");
         assert!(e.message.contains("empty.pem") && e.message.contains("no certificate"), "{}", e.message);
+        // An RDS host reads the file just the same; the built-in roots are no excuse for a bad file.
+        let e = rustls_connector("db.abc.us-east-1.rds.amazonaws.com", Some(empty.to_str().unwrap())).err().expect("an error");
+        assert!(e.message.contains("empty.pem"), "{}", e.message);
 
         let missing = dir.join("missing.pem");
-        let e = rustls_connector(Some(missing.to_str().unwrap())).err().expect("an error");
+        let e = rustls_connector("db.acme.io", Some(missing.to_str().unwrap())).err().expect("an error");
         assert!(e.message.starts_with("CA certificate ") && e.message.contains("missing.pem"), "{}", e.message);
         std::fs::remove_dir_all(&dir).unwrap();
     }
@@ -501,12 +615,18 @@ mod tests {
     #[test]
     fn unknown_issuer_without_a_ca_file_says_what_to_do() {
         let raw = "error performing TLS handshake: invalid peer certificate: UnknownIssuer";
-        let e = explain_unknown_issuer(DbError::msg(raw), None);
+        let e = explain_unknown_issuer(DbError::msg(raw), "db.acme.io", None);
         assert!(e.message.starts_with(raw) && e.message.contains("CA certificate"), "{}", e.message);
+        // Nobody but an RDS user needs the RDS trust store, and an RDS user has it built in.
+        assert!(!e.message.contains("RDS"), "{}", e.message);
         // With a CA file the file itself is the suspect, so the message stays as it was.
-        assert_eq!(explain_unknown_issuer(DbError::msg(raw), Some("~/ca.pem")).message, raw);
-        assert_eq!(explain_unknown_issuer(DbError::msg(raw), Some("  ")).message, e.message);
-        assert_eq!(explain_unknown_issuer(DbError::msg("connection refused"), None).message, "connection refused");
+        assert_eq!(explain_unknown_issuer(DbError::msg(raw), "db.acme.io", Some("~/ca.pem")).message, raw);
+        assert_eq!(explain_unknown_issuer(DbError::msg(raw), "db.acme.io", Some("  ")).message, e.message);
+        assert_eq!(explain_unknown_issuer(DbError::msg("connection refused"), "db.acme.io", None).message, "connection refused");
+        // An RDS host that still fails has outgrown the shipped bundle; the region's is the stopgap.
+        let rds = explain_unknown_issuer(DbError::msg(raw), "db.abc.us-east-1.rds.amazonaws.com", None);
+        assert!(rds.message.contains("built into") && rds.message.contains("truststore.pki.rds.amazonaws.com"), "{}", rds.message);
+        assert_eq!(explain_unknown_issuer(DbError::msg(raw), "db.abc.us-east-1.rds.amazonaws.com", Some("~/ca.pem")).message, raw);
     }
 
     #[test]
