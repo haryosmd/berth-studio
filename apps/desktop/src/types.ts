@@ -84,6 +84,37 @@ export interface Page extends ResultSet {
   elapsedMs: number;
 }
 
+/** How a filter chip compares its column with its value; the Rust side binds the value as a parameter. */
+export type FilterOp = 'eq' | 'ne' | 'lt' | 'le' | 'gt' | 'ge' | 'contains' | 'startsWith' | 'isNull' | 'isNotNull' | 'in';
+
+export interface Filter {
+  column: string;
+  op: FilterOp;
+  value?: string;
+  /** For `in` only. */
+  values?: string[];
+}
+
+export interface Sort {
+  column: string;
+  descending: boolean;
+}
+
+export interface BrowseRequest {
+  filters: Filter[];
+  /** A raw SQL condition, appended as `AND (…)`; one expression, never a second statement. */
+  where: string | null;
+  sort: Sort | null;
+  limit: number;
+  offset: number;
+}
+
+/** Exact when the request filters, otherwise the planner's estimate (`null` for views and unanalysed tables). */
+export interface RowCount {
+  total: number | null;
+  exact: boolean;
+}
+
 export interface RunResult {
   results: ResultSet[];
   role: Role;

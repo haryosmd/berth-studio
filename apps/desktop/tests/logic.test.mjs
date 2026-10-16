@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 import {
   DEFAULT_ENVIRONMENTS, swapEnvToken, copyProfile, cellKind, display, roleIndex, lineCol, shortType, blankProfile, effectiveEnv,
   hasWrite, nextEnvId, validEnvId, documentsToGrid, cellText, bsonType, idText, formatBytes, groupBySchema, matchesFilter, browseStatus,
+  filterText, parseInValues, findRows, rowCountText, nextSort, compact,
 } from '../src/logic.ts';
 
 const [dev, staging, prod] = DEFAULT_ENVIRONMENTS;
@@ -62,6 +63,7 @@ test('cells are coloured by their Postgres type', () => {
   assert.equal(cellKind('t', { name: 'b', typeName: 'boolean', primaryKey: false }), 'bool');
   assert.equal(cellKind('12.5', undefined), 'num');
   assert.equal(display('t', { name: 'b', typeName: 'boolean', primaryKey: false }), 'true');
+  assert.equal(display('false', { name: 'b', typeName: 'boolean', primaryKey: false }), 'false', 'a boolean cast to text');
   assert.equal(display(null, undefined), 'NULL');
   assert.equal(shortType('timestamp with time zone'), 'timestamptz');
 });
@@ -119,6 +121,40 @@ test('the status bar explains whether a table can be edited', () => {
   assert.equal(browseStatus({ endpoints: [{ role: 'read' }], readOnly: false, autoRoute: true }, false, true), 'read-only profile');
   assert.equal(browseStatus(write, false, true), 'editable · changes are reviewed before commit');
   assert.equal(browseStatus(write, false, false), 'read-write profile');
+});
+
+test('filter chips read like SQL', () => {
+  assert.equal(filterText({ column: 'plan', op: 'ne', value: 'deleted' }), "plan ≠ 'deleted'");
+  assert.equal(filterText({ column: 'last_login', op: 'isNull' }), 'last_login is null');
+  assert.equal(filterText({ column: 'id', op: 'in', values: ['1', '2', '3'] }), 'id in (1, 2, 3)');
+  assert.equal(filterText({ column: 'email', op: 'contains', value: 'acme' }), "email contains 'acme'");
+  assert.deepEqual(parseInValues(' 1, 2,,3\n2 '), ['1', '2', '3']);
+});
+
+test('find in results matches any cell, case-insensitively', () => {
+  const rows = [['1', 'user1@acme.dev', null], ['2', 'USER12@acme.dev', 'x'], ['3', 'other', null]];
+  assert.deepEqual(findRows(rows, 'user1'), [0, 1]);
+  assert.deepEqual(findRows(rows, 'X'), [1]);
+  assert.deepEqual(findRows(rows, ''), [0, 1, 2]);
+  assert.deepEqual(findRows(rows, 'null'), [], 'NULL cells are not text');
+});
+
+test('the footer shows the range and an exact or estimated total', () => {
+  assert.equal(rowCountText(0, 200, { total: 1300, exact: true }), 'Rows 1–200 of 1,300');
+  assert.equal(rowCountText(200, 200, { total: 1300, exact: false }), 'Rows 201–400 of ~1.3k');
+  assert.equal(rowCountText(0, 50, { total: null, exact: false }), 'Rows 1–50');
+  assert.equal(rowCountText(0, 50, null), 'Rows 1–50');
+  assert.equal(rowCountText(0, 0, { total: 0, exact: true }), '');
+  assert.equal(compact(999), '999');
+  assert.equal(compact(8000), '8.0k');
+  assert.equal(compact(2_400_000), '2.4M');
+});
+
+test('a header click cycles the sort', () => {
+  assert.deepEqual(nextSort(null, 'id'), { column: 'id', descending: false });
+  assert.deepEqual(nextSort({ column: 'id', descending: false }, 'id'), { column: 'id', descending: true });
+  assert.equal(nextSort({ column: 'id', descending: true }, 'id'), null);
+  assert.deepEqual(nextSort({ column: 'id', descending: true }, 'plan'), { column: 'plan', descending: false });
 });
 
 test('formatBytes shows kilobytes below a megabyte and one decimal above', () => {

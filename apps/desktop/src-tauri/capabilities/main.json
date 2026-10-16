@@ -16,6 +16,7 @@
     "allow-test-profile",
     "allow-list-tables",
     "allow-browse-table",
+    "allow-count-rows",
     "allow-run-query",
     "allow-cancel-query",
     "allow-mongo-overview",

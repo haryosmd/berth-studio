@@ -9,7 +9,7 @@ mod workspace;
 use app::{App, DocumentWrite, EndpointCheck, MongoOverview, Page, PasswordInput, RunResult, WriteOutcome};
 use berth_core::{Connection, Engine, EnvId, Environment, Profile, RouteMode};
 use berth_mongo::{CollectionInfo, Documents, FindRequest};
-use berth_postgres::{DbError, Table};
+use berth_postgres::{BrowseRequest, DbError, RowCount, Table};
 use tauri::ipc::Channel;
 use tauri::{AppHandle, Manager, State};
 use update::{Pending, Progress, UpdateInfo};
@@ -63,10 +63,21 @@ async fn browse_table(
     env: EnvId,
     schema: String,
     table: String,
-    limit: u32,
-    offset: u64,
+    request: BrowseRequest,
 ) -> Result<Page, DbError> {
-    app.browse_table(&id, &env, &schema, &table, limit, offset).await
+    app.browse_table(&id, &env, &schema, &table, &request).await
+}
+
+#[tauri::command]
+async fn count_rows(
+    app: State<'_, App>,
+    id: String,
+    env: EnvId,
+    schema: String,
+    table: String,
+    request: BrowseRequest,
+) -> Result<RowCount, DbError> {
+    app.count_rows(&id, &env, &schema, &table, &request).await
 }
 
 #[tauri::command]
@@ -188,6 +199,7 @@ fn main() {
             test_profile,
             list_tables,
             browse_table,
+            count_rows,
             run_query,
             cancel_query,
             mongo_overview,

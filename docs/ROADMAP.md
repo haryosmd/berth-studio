@@ -42,7 +42,7 @@ Done:
 - [x] Provider specifications checked against official documentation: [providers/](providers/README.md).
 
 Next:
-- [ ] Filter bar in the table browser (filters become parameterised queries)
+- [x] Filter bar in the table browser (filters become parameterised queries), column sort, row counts and find-in-results
 - [ ] Inline editing with an SQL review step and a single-transaction commit
 - [ ] Export results to CSV and JSON
 - [ ] SQL autocomplete from a schema cache
