@@ -8,15 +8,15 @@ import { QueryView } from './QueryView';
 import { TableView } from './TableView';
 import { Spinner, TreeNote } from './Status';
 import { UpdateButton } from './UpdateButton';
-import { DEFAULT_ENVIRONMENTS, browseStatus, compact, effectiveEnv, findEnv, groupBySchema, hasRead, hasWrite, matchesFilter } from './logic';
-import type { CollectionInfo, Connection, DbError, EnvId, Environment, MongoOverview, Role, Table } from './types';
+import { DEFAULT_ENVIRONMENTS, browseStatus, compact, effectiveEnv, filterText, findEnv, groupBySchema, hasRead, hasWrite, matchesFilter } from './logic';
+import type { CollectionInfo, Connection, DbError, EnvId, Environment, Filter, MongoOverview, Role, Table } from './types';
 
 /** What the footer shows for the active tab. `browse` marks a table tab, whose session is read-only whatever the profile allows. */
 export interface Status { role: Role; host: string; detail: string; readOnly: boolean; browse?: boolean }
 
 /** Every tab follows the workspace environment unless `pin` holds its own. */
 type Tab = { key: string; conn: string; pin?: EnvId } & (
-  | { kind: 'table'; schema: string; table: string }
+  | { kind: 'table'; schema: string; table: string; filters?: Filter[] }
   | { kind: 'query'; n: number }
   | { kind: 'collection'; db: string; collection: string }
 );
@@ -116,6 +116,12 @@ export function App() {
   };
 
   const openTab = (t: Tab) => { setTabs(ts => (ts.some(x => x.key === t.key) ? ts : [...ts, t])); setActive(t.key); };
+  /** A table opened by following a foreign key gets its own tab, keyed by its chips, so the plain tab stays. */
+  const openTable = (conn: string, schema: string, table: string, filters?: Filter[]) => {
+    const base = `t|${conn}|${schema}.${table}`;
+    const chips = filters?.length ? filters : undefined;
+    openTab({ key: chips ? `${base}|${chips.map(filterText).join(' & ')}` : base, kind: 'table', conn, schema, table, filters: chips });
+  };
   const newQuery = (conn: string) => {
     const n = tabs.filter(t => t.kind === 'query').length + 1;
     openTab({ key: `q|${conn}|${Date.now()}`, kind: 'query', conn, n });
@@ -270,7 +276,7 @@ export function App() {
                                 {shown.map(t => {
                                   const key = `t|${c.id}|${t.schema}.${t.name}`;
                                   return (
-                                    <button key={key} className={`node lvl2${active === key ? ' active' : ''}`} onClick={() => openTab({ key, kind: 'table', conn: c.id, schema: t.schema, table: t.name })}>
+                                    <button key={key} className={`node lvl2${active === key ? ' active' : ''}`} onClick={() => openTable(c.id, t.schema, t.name)}>
                                       <Icon name={t.kind === 'table' ? 'table' : 'view'} />
                                       <span className="lbl">{t.name}</span>
                                       <span className="meta">{t.estimatedRows >= 0 ? compact(t.estimatedRows) : ''}</span>
@@ -353,6 +359,7 @@ export function App() {
                     <Icon name={t.kind === 'query' ? 'code' : t.kind === 'collection' ? 'leaf' : 'table'} size={14} />
                     <span className="lbl">{t.kind === 'table' ? t.table : t.kind === 'collection' ? t.collection : `Query ${t.n}`}</span>
                     <span className="faint">{t.conn}</span>
+                    {t.kind === 'table' && t.filters && <span className="pin-badge filtered" title={t.filters.map(filterText).join(' and ')}><Icon name="filter" size={10} />filtered</span>}
                     {t.pin && <span className="pin-badge" title={`Pinned to ${te?.label}`}><Dot env={te} />{te?.label}</span>}
                     <button className="x" aria-label="Close tab" onClick={e => { e.stopPropagation(); closeTab(t.key); }}><Icon name="x" size={12} /></button>
                   </div>
@@ -376,7 +383,8 @@ export function App() {
               </div>
             </div>
           ) : tab.kind === 'table' ? (
-            <TableView key={`${tab.key}|${tabEnvId}`} conn={tab.conn} env={tabEnvId} envLabel={tabEnv.label} schema={tab.schema} table={tab.table} envControl={envControl} onStatus={onStatus} />
+            <TableView key={`${tab.key}|${tabEnvId}`} conn={tab.conn} env={tabEnvId} envLabel={tabEnv.label} schema={tab.schema} table={tab.table} envControl={envControl} onStatus={onStatus}
+              onOpenTable={(s, t, f) => openTable(tab.conn, s, t, f)} initialFilters={tab.filters} />
           ) : tab.kind === 'collection' ? (
             <CollectionView key={`${tab.key}|${tabEnvId}`} conn={tab.conn} env={tabEnvId} envLabel={tabEnv.label} db={tab.db} collection={tab.collection}
               readOnly={profile.readOnly || tabEnv.production} canWrite={!profile.readOnly || tabEnv.production} envControl={envControl} onStatus={onStatus} />

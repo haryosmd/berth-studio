@@ -70,6 +70,25 @@ export interface Column {
   name: string;
   typeName?: string;
   primaryKey: boolean;
+  /** Set by the interface when the column is part of a foreign key: the column it points at. */
+  fk?: { schema: string; table: string; column: string };
+}
+
+/** One foreign key: `table.columns` point at `refTable.refColumns`, in matching order. */
+export interface ForeignKey {
+  name: string;
+  schema: string;
+  table: string;
+  columns: string[];
+  refSchema: string;
+  refTable: string;
+  refColumns: string[];
+}
+
+export interface TableInfo {
+  columns: Column[];
+  foreignKeys: ForeignKey[];
+  referencedBy: ForeignKey[];
 }
 
 export interface ResultSet {

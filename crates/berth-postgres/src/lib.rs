@@ -300,6 +300,28 @@ pub struct Column {
     pub primary_key: bool,
 }
 
+/// One foreign key: `table.columns` point at `ref_table.ref_columns`, in matching order.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ForeignKey {
+    pub name: String,
+    pub schema: String,
+    pub table: String,
+    pub columns: Vec<String>,
+    pub ref_schema: String,
+    pub ref_table: String,
+    pub ref_columns: Vec<String>,
+}
+
+/// A table's columns and the foreign keys it holds and receives.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TableInfo {
+    pub columns: Vec<Column>,
+    pub foreign_keys: Vec<ForeignKey>,
+    pub referenced_by: Vec<ForeignKey>,
+}
+
 #[derive(Debug, Clone, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ResultSet {
@@ -414,6 +436,24 @@ impl Session {
             return Err(DbError::msg(format!("{schema}.{table} does not exist, or you cannot read it.")));
         }
         Ok(rows.iter().map(|r| Column { name: r.get(0), type_name: Some(r.get(1)), primary_key: r.get(2) }).collect())
+    }
+
+    /// The table's columns plus its foreign keys, outgoing and incoming, from `pg_constraint`.
+    pub async fn describe(&self, schema: &str, table: &str) -> Result<TableInfo, DbError> {
+        let columns = self.columns(schema, table).await?;
+        let fetch = |filter: &'static str| async move {
+            let rows = self
+                .client
+                .query(
+                    &format!("{FK_SQL} WHERE con.contype = 'f' AND {filter} ORDER BY con.conname, n.nspname, c.relname, k.ord"),
+                    &[&schema, &table],
+                )
+                .await?;
+            Ok::<_, DbError>(fold_foreign_keys(rows.iter().map(|r| (r.get(0), r.get(1), r.get(2), r.get(3), r.get(4), r.get(5), r.get(6)))))
+        };
+        let foreign_keys = fetch("n.nspname = $1 AND c.relname = $2").await?;
+        let referenced_by = fetch("fn.nspname = $1 AND fc.relname = $2").await?;
+        Ok(TableInfo { columns, foreign_keys, referenced_by })
     }
 
     /// One page of a table: filtered, sorted (by the primary key unless asked otherwise) and cut
@@ -608,6 +648,37 @@ pub(crate) fn build_browse(schema: &str, table: &str, columns: &[Column], req: &
     let sql = format!("SELECT {} FROM {from}{where_}{order} LIMIT {limit} OFFSET {}", select_list(columns), req.offset);
     let count_sql = format!("SELECT count(*) FROM {from}{where_}");
     Ok(Built { sql, count_sql, params, raw_start, filtered })
+}
+
+/// One row per column pair of a foreign key: constraint name, referencing schema, table and
+/// column, then the referenced schema, table and column. `unnest … WITH ORDINALITY` keeps the
+/// pairs of a composite key in order.
+const FK_SQL: &str =
+    "SELECT con.conname::text, n.nspname::text, c.relname::text, att.attname::text, fn.nspname::text, fc.relname::text, fatt.attname::text
+   FROM pg_catalog.pg_constraint con
+   JOIN pg_catalog.pg_class c ON c.oid = con.conrelid
+   JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+   JOIN pg_catalog.pg_class fc ON fc.oid = con.confrelid
+   JOIN pg_catalog.pg_namespace fn ON fn.oid = fc.relnamespace
+   JOIN LATERAL unnest(con.conkey, con.confkey) WITH ORDINALITY AS k(a, fa, ord) ON true
+   JOIN pg_catalog.pg_attribute att ON att.attrelid = c.oid AND att.attnum = k.a
+   JOIN pg_catalog.pg_attribute fatt ON fatt.attrelid = fc.oid AND fatt.attnum = k.fa";
+
+type FkRow = (String, String, String, String, String, String, String);
+
+/// Folds consecutive rows of one constraint into a [`ForeignKey`]; rows come sorted by constraint.
+fn fold_foreign_keys(rows: impl IntoIterator<Item = FkRow>) -> Vec<ForeignKey> {
+    let mut out: Vec<ForeignKey> = Vec::new();
+    for (name, schema, table, column, ref_schema, ref_table, ref_column) in rows {
+        match out.last_mut() {
+            Some(fk) if fk.name == name && fk.schema == schema && fk.table == table => {
+                fk.columns.push(column);
+                fk.ref_columns.push(ref_column);
+            }
+            _ => out.push(ForeignKey { name, schema, table, columns: vec![column], ref_schema, ref_table, ref_columns: vec![ref_column] }),
+        }
+    }
+    out
 }
 
 /// Every column as text, so the grid gets the same strings the simple query protocol sends.
@@ -856,6 +927,33 @@ mod tests {
             .message
             .contains("longer than"));
         assert!(!build_browse("public", "users", &users(), &raw("   ")).unwrap().filtered, "blank is no condition");
+    }
+
+    #[test]
+    fn foreign_key_rows_fold_into_keys_with_their_column_pairs_in_order() {
+        let r = |name: &str, col: &str, rcol: &str| {
+            (
+                name.to_string(),
+                "public".to_string(),
+                "orders".to_string(),
+                col.to_string(),
+                "public".to_string(),
+                "users".to_string(),
+                rcol.to_string(),
+            )
+        };
+        let fks = fold_foreign_keys(vec![
+            r("orders_user_fk", "user_id", "id"),
+            r("orders_user_fk", "user_org", "org_id"),
+            r("orders_zone_fk", "zone", "id"),
+        ]);
+        assert_eq!(fks.len(), 2);
+        assert_eq!(
+            (fks[0].columns.clone(), fks[0].ref_columns.clone()),
+            (vec!["user_id".to_string(), "user_org".into()], vec!["id".to_string(), "org_id".into()])
+        );
+        assert_eq!((fks[1].name.as_str(), fks[1].ref_table.as_str()), ("orders_zone_fk", "users"));
+        assert!(fold_foreign_keys(vec![]).is_empty());
     }
 
     #[test]

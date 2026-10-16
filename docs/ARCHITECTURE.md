@@ -136,6 +136,7 @@ The webview can call exactly the commands below. Each one is listed in `apps/des
 | `test_profile` | Connects read-only to every endpoint of a draft profile and reports the server version or the error |
 | `list_tables` | Tables, views and materialised views the user can read |
 | `browse_table` | One page of a table: filter chips, an optional `WHERE` condition, a sort, limit and offset, all bound as parameters |
+| `describe_table` | A table's columns and its foreign keys, outgoing and incoming, from `pg_constraint` |
 | `count_rows` | How many rows a browse request matches: exact when it filters, the planner's estimate otherwise |
 | `run_query` | Routes, guards production, runs, and reports where the query ran |
 | `cancel_query` | Cancels a running query by its run id |

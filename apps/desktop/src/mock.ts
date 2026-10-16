@@ -2,7 +2,7 @@
 // production build (see api.ts) and never talks to a database. It mirrors the Rust rules that
 // matter for the screens: production writes need the typed name, read-only profiles cannot write.
 import type {
-  BrowseRequest, CollectionInfo, Connection, Documents, Environment, Filter, Json, Page, ResultSet, RunResult, Table,
+  BrowseRequest, CollectionInfo, Connection, Documents, Environment, Filter, Json, Page, ResultSet, RunResult, Table, TableInfo,
 } from './types';
 import { DEFAULT_ENVIRONMENTS } from './logic';
 
@@ -149,6 +149,18 @@ export async function invoke<T>(cmd: string, args: Record<string, any> = {}): Pr
     case 'test_profile': return (args.profile.endpoints as any[]).map((e, index) => ({ role: e.role, index, host: e.uri ?? e.host, ok: true, message: args.engine === 'mongodb' ? 'MongoDB 8.0.34 · replica set rs0' : 'PostgreSQL 16.15' })) as T;
     case 'list_tables': return tables as T;
     case 'browse_table': { const r = args.request as BrowseRequest; return { ...users(r.offset, r.limit, r), host: 'db-r.dev.acme.internal', elapsedMs: 7 } as Page as T; }
+    case 'describe_table': {
+      const fk = (table: string, columns: string[], refTable: string, refColumns: string[]) =>
+        ({ name: `${table}_${columns[0]}_fkey`, schema: 'public', table, columns, refSchema: 'public', refTable, refColumns });
+      const usersOrg = fk('users', ['org_id'], 'orgs', ['id']);
+      const ordersUser = fk('orders', ['user_id'], 'users', ['id']);
+      const info: Record<string, TableInfo> = {
+        users: { columns: USER_COLUMNS, foreignKeys: [usersOrg], referencedBy: [ordersUser] },
+        orgs: { columns: USER_COLUMNS, foreignKeys: [], referencedBy: [usersOrg] },
+        orders: { columns: USER_COLUMNS, foreignKeys: [ordersUser], referencedBy: [] },
+      };
+      return (info[args.table] ?? { columns: USER_COLUMNS, foreignKeys: [], referencedBy: [] }) as T;
+    }
     case 'count_rows': {
       const r = args.request as BrowseRequest;
       return (r.filters.length || r.where ? { total: selectUsers(r).length, exact: true } : { total: 1300, exact: false }) as T;

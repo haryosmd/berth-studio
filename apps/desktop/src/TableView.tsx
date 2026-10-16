@@ -6,8 +6,8 @@ import { api } from './api';
 import { Grid } from './Grid';
 import { Icon } from './Icons';
 import { Placeholder, Spinner } from './Status';
-import { OPS, filterText, findRows, nextSort, parseInValues, rowCountText } from './logic';
-import type { BrowseRequest, DbError, EnvId, Filter, FilterOp, Page, RowCount, Sort } from './types';
+import { OPS, attachForeignKeys, filterText, findRows, fkFilters, nextSort, parseInValues, rowCountText, tableLabel } from './logic';
+import type { BrowseRequest, DbError, EnvId, Filter, FilterOp, Page, RowCount, Sort, TableInfo } from './types';
 import type { Status } from './App';
 
 const PAGE = 200;
@@ -20,17 +20,23 @@ interface Props {
   table: string;
   envControl: ReactNode;
   onStatus: (s: Status) => void;
+  /** Opens another table of the same connection, filtered: how a foreign key is followed. */
+  onOpenTable: (schema: string, table: string, filters: Filter[]) => void;
+  /** Chips the tab starts with, when it was opened by following a foreign key. */
+  initialFilters?: Filter[];
 }
 
 type Draft = { column: string; op: FilterOp; value: string };
 
-export function TableView({ conn, env, envLabel, schema, table, envControl, onStatus }: Props) {
+export function TableView({ conn, env, envLabel, schema, table, envControl, onStatus, onOpenTable, initialFilters }: Props) {
   const [offset, setOffset] = useState(0);
   const [page, setPage] = useState<Page | null>(null);
   const [error, setError] = useState<DbError | null>(null);
   const [loading, setLoading] = useState(false);
   const [nonce, setNonce] = useState(0);
-  const [filters, setFilters] = useState<Filter[]>([]);
+  const [filters, setFilters] = useState<Filter[]>(initialFilters ?? []);
+  const [info, setInfo] = useState<TableInfo | null>(null);
+  const [selected, setSelected] = useState<number | null>(null);
   // The condition in force, and the one being typed; Apply (or Enter) moves the draft across.
   const [where, setWhere] = useState('');
   const [whereDraft, setWhereDraft] = useState('');
@@ -71,6 +77,21 @@ export function TableView({ conn, env, envLabel, schema, table, envControl, onSt
     return () => { live = false; };
   }, [conn, env, schema, table, offset, nonce, request, onStatus]);
 
+  // Foreign keys are a nicety on top of the page: a failure here shows nothing, the page's own error does.
+  useEffect(() => {
+    let live = true;
+    api.describeTable(conn, env, schema, table).then(i => live && setInfo(i)).catch(() => live && setInfo(null));
+    return () => { live = false; };
+  }, [conn, env, schema, table, nonce]);
+  useEffect(() => setSelected(null), [page]);
+
+  const columns = useMemo(() => (page ? attachForeignKeys(page.columns, info?.foreignKeys ?? []) : []), [page, info]);
+  const follow = (row: number, col: number) => {
+    const name = columns[col]?.name;
+    const fk = info?.foreignKeys.find(f => f.columns.includes(name));
+    const chips = fk && page ? fkFilters(fk, page.rows[row], page.columns, 'out') : null;
+    if (fk && chips) onOpenTable(fk.refSchema, fk.refTable, chips);
+  };
   const hits = useMemo(() => (page ? findRows(page.rows, find) : []), [page, find]);
   const finding = find.trim().length > 0;
   const atEnd = !page || page.rows.length < PAGE || (!!count?.exact && count.total !== null && offset + PAGE >= count.total);
@@ -163,8 +184,9 @@ export function TableView({ conn, env, envLabel, schema, table, envControl, onSt
           </div>
         ) : !page ? <Placeholder loading title={`Loading ${table}…`} />
           : page.rows.length ? (
-            <Grid columns={page.columns} rows={page.rows} offset={offset} sort={sort} onSort={c => setSort(nextSort(sort, c))}
-              visible={finding ? hits : undefined} highlight={finding ? find : undefined} />
+            <Grid columns={columns} rows={page.rows} offset={offset} sort={sort} onSort={c => setSort(nextSort(sort, c))}
+              visible={finding ? hits : undefined} highlight={finding ? find : undefined}
+              selected={selected} onSelect={setSelected} onFollow={follow} />
           )
           : filtered ? <Placeholder title="No rows match these filters">Remove a filter or change the condition.</Placeholder>
           : offset > 0 ? <Placeholder title="No more rows">This is the end of {table}. Go back with Previous.</Placeholder>
@@ -176,6 +198,22 @@ export function TableView({ conn, env, envLabel, schema, table, envControl, onSt
           {finding && <span>{hits.length} of {page.rows.length} loaded rows match “{find.trim()}”</span>}
           <span className="faint">{page.elapsedMs} ms</span>
           {sort && <span className="faint">sorted by {sort.column} {sort.descending ? 'descending' : 'ascending'}</span>}
+          {info && info.referencedBy.length > 0 && (
+            <>
+              <span className="grow" />
+              <span className="faint" title="Tables with a foreign key to this one. Select a row, then open the rows that point at it.">Referenced by</span>
+              {info.referencedBy.map(fk => {
+                const chips = selected !== null ? fkFilters(fk, page.rows[selected], page.columns, 'in') : null;
+                return (
+                  <button key={`${fk.schema}.${fk.table}.${fk.name}`} type="button" className="linkbtn" disabled={!chips}
+                    title={selected === null ? 'Select a row first' : chips ? `Open ${tableLabel(fk.schema, fk.table)} where ${chips.map(filterText).join(' and ')}` : 'This row has no key value to match'}
+                    onClick={() => chips && onOpenTable(fk.schema, fk.table, chips)}>
+                    <Icon name="link" size={12} />{tableLabel(fk.schema, fk.table)}.{fk.columns.join(', ')}
+                  </button>
+                );
+              })}
+            </>
+          )}
         </div>
       )}
     </div>

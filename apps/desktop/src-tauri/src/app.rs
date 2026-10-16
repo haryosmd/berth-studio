@@ -14,7 +14,7 @@ use berth_core::{
     Kind, Profile, Role, RouteMode, RouteOptions,
 };
 use berth_mongo::{CollectionInfo, Documents, FindRequest, MongoError, ServerInfo};
-use berth_postgres::{BrowseRequest, Canceller, DbError, ResultSet, RowCount, Session, Table, Target};
+use berth_postgres::{BrowseRequest, Canceller, DbError, ResultSet, RowCount, Session, Table, TableInfo, Target};
 use berth_secrets::{account, account_of, reference, SecretStore};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -413,6 +413,10 @@ impl App {
         let t = Instant::now();
         let set = s.browse(schema, table, request).await?;
         Ok(Page { set, host, elapsed_ms: t.elapsed().as_millis() as u64 })
+    }
+
+    pub async fn describe_table(&self, id: &str, env: &EnvId, schema: &str, table: &str) -> Result<TableInfo, DbError> {
+        self.reader(id, env).await?.0.describe(schema, table).await
     }
 
     pub async fn count_rows(&self, id: &str, env: &EnvId, schema: &str, table: &str, request: &BrowseRequest) -> Result<RowCount, DbError> {
@@ -831,6 +835,8 @@ mod tests {
 
         let tables = a.list_tables("acme-db", &dev).await.unwrap();
         assert!(tables.iter().any(|t| t.name == "orders"));
+        let info = a.describe_table("acme-db", &dev, "public", "orders").await.unwrap();
+        assert_eq!((info.foreign_keys[0].ref_table.as_str(), info.referenced_by.len()), ("users", 0));
         let page = a
             .browse_table("acme-db", &dev, "public", "orders", &BrowseRequest { limit: 100, offset: 0, ..Default::default() })
             .await

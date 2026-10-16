@@ -119,6 +119,25 @@ async fn filters_sort_and_count_run_as_bound_parameters() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn foreign_keys_are_read_in_both_directions() {
+    let Some(s) = app(true).await else { return };
+    let users = s.describe("public", "users").await.unwrap();
+    assert!(users.columns.iter().any(|c| c.name == "org_id"));
+    assert_eq!(users.foreign_keys.len(), 1);
+    let fk = &users.foreign_keys[0];
+    assert_eq!(
+        (fk.table.as_str(), &fk.columns[..], fk.ref_schema.as_str(), fk.ref_table.as_str(), &fk.ref_columns[..]),
+        ("users", &["org_id".to_string()][..], "public", "orgs", &["id".to_string()][..])
+    );
+    assert!(users.referenced_by.iter().any(|f| f.table == "orders" && f.columns == ["user_id"] && f.ref_columns == ["id"]));
+
+    let orgs = s.describe("public", "orgs").await.unwrap();
+    assert!(orgs.foreign_keys.is_empty());
+    assert!(orgs.referenced_by.iter().any(|f| f.table == "users" && f.columns == ["org_id"]));
+    assert!(s.describe("public", "nope").await.is_err());
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn read_only_sessions_refuse_writes_at_the_server() {
     let Some(s) = app(true).await else { return };
     let err = s.run("UPDATE users SET plan = 'team' WHERE id = 1").await.unwrap_err();
