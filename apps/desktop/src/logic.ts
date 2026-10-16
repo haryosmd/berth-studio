@@ -1,5 +1,5 @@
 // Pure helpers for the interface. No DOM and no IPC, so tests/ can run them with node --test.
-import type { Column, Connection, Endpoint, Engine, EnvId, Environment, Json, Profile, Role } from './types';
+import type { Column, Connection, Endpoint, Engine, EnvId, Environment, Json, Profile, Role, Table } from './types';
 
 /** The environments a new workspace starts with; the Rust side owns the real list. */
 export const DEFAULT_ENVIRONMENTS: Environment[] = [
@@ -45,6 +45,30 @@ export function hasRead(p: Profile | undefined): boolean {
 
 export function hasWrite(p: Profile | undefined): boolean {
   return !!p?.endpoints.some(e => e.role === 'write');
+}
+
+/** Tables grouped by schema for the sidebar: `public` first, the rest in the order the catalog listed them. */
+export function groupBySchema(tables: Table[]): { schema: string; tables: Table[] }[] {
+  const groups: { schema: string; tables: Table[] }[] = [];
+  for (const t of tables) {
+    let g = groups.find(x => x.schema === t.schema);
+    if (!g) groups.push((g = { schema: t.schema, tables: [] }));
+    g.tables.push(t);
+  }
+  return groups.sort((a, b) => (a.schema === 'public' ? -1 : b.schema === 'public' ? 1 : 0));
+}
+
+/** The sidebar filter: a case-insensitive substring of any label. An empty filter matches everything. */
+export function matchesFilter(needle: string, ...labels: string[]): boolean {
+  const q = needle.trim().toLowerCase();
+  return !q || labels.some(l => l.toLowerCase().includes(q));
+}
+
+/** What the status bar says about a table tab: whether rows can be changed, and why not. */
+export function browseStatus(p: Profile | undefined, production: boolean, canEdit: boolean): string {
+  if (production) return 'production is read-only';
+  if (!p || !hasWrite(p) || p.readOnly) return 'read-only profile';
+  return canEdit ? 'editable · changes are reviewed before commit' : 'read-write profile';
 }
 
 /** Index of an endpoint among the endpoints that share its role (how passwords are matched). */

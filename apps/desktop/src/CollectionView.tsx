@@ -105,7 +105,7 @@ export function CollectionView({ conn, env, envLabel, db, collection, readOnly, 
   return (
     <div className="pane">
       <div className="toolbar">
-        <span className="crumb"><span className="faint">{conn} · {db}.</span>{collection}</span>
+        <span className="crumb"><Icon name="leaf" size={12} /><span>{conn} · {envLabel}</span><Icon name="chev" size={12} /><span>{db}</span><Icon name="chev" size={12} /><b>{collection}</b></span>
         <div className="rtabs inline" role="tablist">
           {(['documents', 'aggregate', 'indexes'] as Mode[]).map(m => (
             <button key={m} role="tab" aria-selected={mode === m} onClick={() => { setMode(m); setResult(null); setError(null); }}>

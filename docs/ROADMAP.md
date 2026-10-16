@@ -46,7 +46,7 @@ Next:
 - [ ] Inline editing with an SQL review step and a single-transaction commit
 - [ ] Export results to CSV and JSON
 - [ ] SQL autocomplete from a schema cache
-- [ ] Command palette (⌘K) and sidebar filter
+- [ ] Command palette (⌘K); the sidebar filter (⌘P) is done
 - [ ] SSH tunnels with host-key verification
 - [ ] Query history in a local SQLite store
 - [ ] Continuous integration, running the workflow in `.github/workflows/ci.yml` on every pull request
