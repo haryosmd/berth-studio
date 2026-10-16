@@ -1,12 +1,13 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "main",
-  "description": "The only window. Core window features plus Berth Studio's own commands; no shell, no file system, no HTTP. The updater plugin's own commands are not allowed: updates go through check_update and install_update.",
+  "description": "The only window. Core window features plus Berth Studio's own commands; no shell, no file system, no HTTP. The updater plugin's own commands are not allowed: updates go through check_update and install_update. start-dragging is not in core:default and the title bar is an overlay, so without it the window cannot be moved.",
   "windows": [
     "main"
   ],
   "permissions": [
     "core:default",
+    "core:window:allow-start-dragging",
     "allow-list-environments",
     "allow-save-environments",
     "allow-list-connections",
