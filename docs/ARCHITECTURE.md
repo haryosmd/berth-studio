@@ -110,7 +110,7 @@ A confirmed write runs on a one-off session that is closed afterwards. Every oth
 - **Result size:** a result keeps at most 5,000 rows and is marked `truncated` beyond that, so one careless `SELECT *` cannot exhaust memory.
 - **Values as text:** values travel as text through the simple query protocol. Types for table browsing come from the catalog.
 - **Table browsing:** the schema and table are first confirmed in `pg_catalog`, and only then quoted into SQL. Limit and offset are integers.
-- **TLS:** TLS uses rustls with the macOS trust store, and the certificate host name is checked too. `auto` means required for every host except `localhost`. There is no OpenSSL in the dependency tree.
+- **TLS:** TLS uses rustls with the macOS trust store, and the certificate host name is checked too. `auto` means required for every host except `localhost`. An endpoint can add a PEM file of CA certificates to that store, which RDS needs. There is no OpenSSL in the dependency tree.
 
 Sessions are cached per connection, environment, role and read-only flag. Saving a connection drops its cached sessions.
 

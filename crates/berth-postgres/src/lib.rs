@@ -54,9 +54,26 @@ impl From<tokio_postgres::Error> for DbError {
                 },
             },
             // Connection errors carry no SQLSTATE; their text never includes the password.
-            None => DbError::msg(e.to_string()),
+            None => DbError::msg(chain(&e)),
         }
     }
+}
+
+/// The error and every cause behind it, joined with `: `. `tokio_postgres` keeps the reason a
+/// handshake failed only in `source()`, so without this a TLS failure reads just
+/// "error performing TLS handshake".
+fn chain(e: &dyn std::error::Error) -> String {
+    let mut out = e.to_string();
+    let mut cur = e.source();
+    while let Some(s) = cur {
+        let text = s.to_string();
+        if !text.is_empty() && !out.ends_with(&text) {
+            out.push_str(": ");
+            out.push_str(&text);
+        }
+        cur = s.source();
+    }
+    out
 }
 
 /// Everything needed to open a session, except the password.
@@ -87,17 +104,40 @@ enum Tls {
     Rustls(tokio_postgres_rustls::MakeRustlsConnect),
 }
 
-fn rustls_connector() -> Result<tokio_postgres_rustls::MakeRustlsConnect, DbError> {
-    use rustls_platform_verifier::BuilderVerifierExt;
-    // Certificates are checked against the macOS trust store, including the host name.
+/// Certificates are checked against the macOS trust store, including the host name. A PEM file
+/// at `ca_cert` adds roots to that store for this connection, which is what RDS needs: Amazon
+/// signs RDS certificates with its own CA, which no operating system ships.
+fn rustls_connector(ca_cert: Option<&str>) -> Result<tokio_postgres_rustls::MakeRustlsConnect, DbError> {
+    use rustls_platform_verifier::{BuilderVerifierExt, Verifier};
+    let setup = |e: &dyn std::fmt::Display| DbError::msg(format!("TLS setup failed: {e}"));
     let provider = Arc::new(rustls::crypto::ring::default_provider());
-    let config = rustls::ClientConfig::builder_with_provider(provider)
-        .with_safe_default_protocol_versions()
-        .map_err(|e| DbError::msg(format!("TLS setup failed: {e}")))?
-        .with_platform_verifier()
-        .map_err(|e| DbError::msg(format!("TLS setup failed: {e}")))?
-        .with_no_client_auth();
+    let builder =
+        rustls::ClientConfig::builder_with_provider(provider.clone()).with_safe_default_protocol_versions().map_err(|e| setup(&e))?;
+    let config = match ca_cert.map(str::trim).filter(|p| !p.is_empty()) {
+        None => builder.with_platform_verifier().map_err(|e| setup(&e))?,
+        Some(path) => {
+            let verifier = Verifier::new_with_extra_roots(extra_roots(path)?, provider)
+                .map_err(|e| DbError::msg(format!("CA certificate {path}: {e}")))?;
+            builder.dangerous().with_custom_certificate_verifier(Arc::new(verifier))
+        }
+    }
+    .with_no_client_auth();
     Ok(tokio_postgres_rustls::MakeRustlsConnect::new(config))
+}
+
+/// Every certificate in the PEM file at `path`. A leading `~` means the home directory.
+fn extra_roots(path: &str) -> Result<Vec<rustls::pki_types::CertificateDer<'static>>, DbError> {
+    use rustls::pki_types::{pem::PemObject, CertificateDer};
+    let fail = |e: &dyn std::fmt::Display| DbError::msg(format!("CA certificate {path}: {e}"));
+    let file = match path.strip_prefix("~/") {
+        Some(rest) => std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(rest)).unwrap_or_else(|| path.into()),
+        None => path.into(),
+    };
+    let roots = CertificateDer::pem_file_iter(&file).map_err(|e| fail(&e))?.collect::<Result<Vec<_>, _>>().map_err(|e| fail(&e))?;
+    if roots.is_empty() {
+        return Err(fail(&"the file holds no certificate"));
+    }
+    Ok(roots)
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -154,7 +194,7 @@ impl Session {
         }
         let tls = if target.uses_tls() {
             cfg.ssl_mode(tokio_postgres::config::SslMode::Require);
-            Tls::Rustls(rustls_connector()?)
+            Tls::Rustls(rustls_connector(e.ca_cert.as_deref())?)
         } else {
             cfg.ssl_mode(tokio_postgres::config::SslMode::Disable);
             Tls::None
@@ -329,6 +369,7 @@ mod tests {
             database: "acme".into(),
             user: "app".into(),
             tls,
+            ca_cert: None,
             uri: None,
             auth_source: None,
             secret: None,
@@ -343,6 +384,48 @@ mod tests {
 
     #[test]
     fn the_tls_connector_builds_with_the_platform_verifier() {
-        assert!(rustls_connector().is_ok());
+        assert!(rustls_connector(None).is_ok());
+        assert!(rustls_connector(Some("  ")).is_ok());
     }
+
+    #[test]
+    fn extra_ca_certificates_come_from_a_pem_file() {
+        let dir = std::env::temp_dir().join(format!("berth-ca-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let ok = dir.join("ca.pem");
+        std::fs::write(&ok, TEST_CA).unwrap();
+        assert!(rustls_connector(Some(ok.to_str().unwrap())).is_ok());
+
+        let empty = dir.join("empty.pem");
+        std::fs::write(&empty, "just text\n").unwrap();
+        let e = rustls_connector(Some(empty.to_str().unwrap())).err().expect("an error");
+        assert!(e.message.contains("empty.pem") && e.message.contains("no certificate"), "{}", e.message);
+
+        let missing = dir.join("missing.pem");
+        let e = rustls_connector(Some(missing.to_str().unwrap())).err().expect("an error");
+        assert!(e.message.starts_with("CA certificate ") && e.message.contains("missing.pem"), "{}", e.message);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn error_messages_carry_every_cause() {
+        use std::io;
+        let inner = io::Error::other("invalid peer certificate: UnknownIssuer");
+        let outer = io::Error::other(inner);
+        // `io::Error::new(_, source)` displays the source itself, so the chain must not repeat it.
+        assert_eq!(chain(&outer), "invalid peer certificate: UnknownIssuer");
+        assert_eq!(chain(&io::Error::other("alone")), "alone");
+    }
+
+    /// A self-signed certificate made for this test; it signs nothing real.
+    const TEST_CA: &str = "-----BEGIN CERTIFICATE-----\n\
+MIIBczCCARigAwIBAgIUMlJKuIV6eJaCtaf6k6FksMyaBF0wCgYIKoZIzj0EAwIw\n\
+HzEdMBsGA1UEAwwUQmVydGggU3R1ZGlvIHRlc3QgQ0EwHhcNMjYxMDE2MDIwMzQx\n\
+WhcNMzYxMDEzMDIwMzQxWjAfMR0wGwYDVQQDDBRCZXJ0aCBTdHVkaW8gdGVzdCBD\n\
+QTBZMBMGByqGSM49AgEGCCqGSM49AwEHA0IABGQjEOoN9jwRFaBeHRYnxFQBM6p6\n\
+k+Eg/lli7/4H37e/JlDvRdWRbapl54PpAc6ExyOUY6ycGnoi5bsrnmt1806jMjAw\n\
+MB0GA1UdDgQWBBQx1SnW8OUm2VxjxUAbX9KNPCvtnjAPBgNVHRMBAf8EBTADAQH/\n\
+MAoGCCqGSM49BAMCA0kAMEYCIQDOy0F1XtwfMG0iq7Fm51E6RGCx7t+UBkLi21VP\n\
+of+/4QIhAJcRuGxo58XqIP+suOfL89u7lmpVgfDhaERdD7FGjHxH\n\
+-----END CERTIFICATE-----";
 }

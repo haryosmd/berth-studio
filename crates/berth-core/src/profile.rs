@@ -56,6 +56,10 @@ pub struct Endpoint {
     pub auth_source: Option<String>,
     #[serde(default)]
     pub tls: TlsMode,
+    /// PostgreSQL only: path to a PEM file with extra CA certificates to trust besides the
+    /// system trust store, for example the Amazon RDS bundle. Ignored when TLS is off.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ca_cert: Option<String>,
     /// A keychain reference such as `keychain://berth-studio/acme-db/dev/write-0`. Never the secret.
     #[serde(default)]
     pub secret: Option<String>,
@@ -357,6 +361,7 @@ mod tests {
             uri: None,
             auth_source: None,
             tls: TlsMode::Auto,
+            ca_cert: None,
             secret: Some(format!("keychain://berth-studio/acme-db/dev/{}", if role == Role::Write { "write" } else { "read" })),
             needs_secret: false,
         }

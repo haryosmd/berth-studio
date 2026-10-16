@@ -174,9 +174,13 @@ export function App() {
           </label>
         )}
         <button className="iconbtn" aria-label="Edit environments" title="Edit environments" onClick={() => setEnvSheet(true)}><Icon name="gear" /></button>
-        <button className="iconbtn" aria-label={`Theme: ${theme}`} title={`Theme: ${theme}`} onClick={() => setTheme(theme === 'system' ? 'light' : theme === 'light' ? 'dark' : 'system')}>
+        <span className="sep" aria-hidden />
+        <label className="target appearance" title="Appearance">
           <Icon name={theme === 'dark' ? 'moon' : theme === 'light' ? 'sun' : 'auto'} />
-        </button>
+          <select value={theme} onChange={e => setTheme(e.target.value as Theme)} aria-label="Appearance">
+            <option value="system">System</option><option value="light">Light</option><option value="dark">Dark</option>
+          </select>
+        </label>
         <UpdateButton />
       </div>
 

@@ -16,6 +16,7 @@ fn target(user: &str, read_only: bool) -> Option<Target> {
         database: "acme".into(),
         user: user.into(),
         tls: TlsMode::Auto,
+        ca_cert: None,
         uri: None,
         auth_source: None,
         secret: None,

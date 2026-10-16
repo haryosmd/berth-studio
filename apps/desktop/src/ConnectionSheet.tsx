@@ -29,6 +29,11 @@ export function ConnectionSheet({ existing, startEnv, environments, onClose, onS
   const [checks, setChecks] = useState<EndpointCheck[] | null>(null);
   const [busy, setBusy] = useState<'test' | 'save' | 'delete' | null>(null);
   const [confirmDelete, setConfirmDelete] = useState(false);
+  const [confirmClose, setConfirmClose] = useState(false);
+  // What the sheet opened with, so closing can tell edits from a look.
+  const [opened] = useState(() => JSON.stringify(profiles));
+  const dirty = Object.values(pw).some(Boolean) || JSON.stringify(profiles) !== opened || (!existing && id.trim() !== '');
+  const close = () => (dirty ? setConfirmClose(true) : onClose());
 
   const environment = findEnv(environments, env) ?? startEnvironment;
   const p = profiles[env];
@@ -74,18 +79,24 @@ export function ConnectionSheet({ existing, startEnv, environments, onClose, onS
     return (
       <label className="field"><span>Password</span>
         <input className="input" type="password" autoComplete="off" value={pw[k] ?? ''}
-          placeholder={e.secret ? 'Saved in Keychain' : e.needsSecret ? 'Needs a password' : 'None'} onChange={x => setPw({ ...pw, [k]: x.target.value })} />
+          placeholder={e.secret ? '••••••••••••' : e.needsSecret ? 'Needs a password' : 'None yet'} onChange={x => setPw({ ...pw, [k]: x.target.value })} />
+        <span className="faint">
+          {pw[k] ? 'Stored in the Keychain when you save.'
+            : e.secret ? 'Saved in the Keychain and never shown again. Type to replace it.'
+            : e.needsSecret ? 'Copied without its password. Type it here.'
+            : 'Stored in the Keychain when you save.'}
+        </span>
       </label>
     );
   };
 
   return (
-    <div className="scrim" role="presentation" onKeyDown={e => e.key === 'Escape' && onClose()}>
+    <div className="scrim" role="presentation" onKeyDown={e => e.key === 'Escape' && close()}>
       <form className="sheet" role="dialog" aria-label={existing ? `Edit ${existing.id}` : 'New connection'} onSubmit={e => { e.preventDefault(); save(); }}>
         <header>
           <Icon name={engine === 'mongodb' ? 'leaf' : 'db'} />
           <h2>{existing ? `Edit ${existing.id}` : 'New connection'}</h2>
-          <button type="button" className="iconbtn" onClick={onClose} aria-label="Close"><Icon name="x" /></button>
+          <button type="button" className="iconbtn" onClick={close} aria-label="Close"><Icon name="x" /></button>
         </header>
         <div className="content">
           {!existing && (
@@ -167,11 +178,20 @@ export function ConnectionSheet({ existing, startEnv, environments, onClose, onS
                     </label>
                     {passwordField(i, e)}
                   </div>
+                  {e.tls !== 'disable' && (
+                    <label className="field"><span>CA certificate, optional: a PEM file trusted besides the system store, such as the Amazon RDS bundle</span>
+                      <input className="input mono" value={e.caCert ?? ''} placeholder="~/Downloads/ap-southeast-1-bundle.pem" spellCheck={false}
+                        onChange={x => setEp(i, { caCert: x.target.value || undefined })} />
+                    </label>
+                  )}
                 </div>
               ))}
-              <div><button type="button" className="btn" onClick={() => setProfile({ ...p, endpoints: [...p.endpoints, blankEndpoint('read', p.endpoints.find(x => x.role === 'write') ?? p.endpoints[0])] })}>
-                <Icon name="plus" />Add read replica
-              </button></div>
+              <div className="addrow">
+                <button type="button" className="btn" onClick={() => setProfile({ ...p, endpoints: [...p.endpoints, blankEndpoint('read', p.endpoints.find(x => x.role === 'write') ?? p.endpoints[0])] })}>
+                  <Icon name="plus" />Add read replica
+                </button>
+                <span className="faint">Optional. Reads can go to a replica, such as an RDS reader endpoint or a read-only user. Writes always go to the primary.</span>
+              </div>
             </>
           )}
 
@@ -204,10 +224,16 @@ export function ConnectionSheet({ existing, startEnv, environments, onClose, onS
           <button type="button" className="btn" disabled={!!busy || !p} onClick={test}>
             {busy === 'test' ? <><Spinner />Testing…</> : `Test ${environment.label}`}
           </button>
-          <button type="button" className="btn" onClick={onClose}>Cancel</button>
-          <button type="submit" className="btn primary" disabled={!!busy || !id.trim() || !Object.values(profiles).some(Boolean)}>
-            {busy === 'save' ? <><Spinner />Saving…</> : 'Save'}
-          </button>
+          {confirmClose ? (
+            <><span className="muted">Discard unsaved changes{Object.values(pw).some(Boolean) ? ', including the typed password' : ''}?</span>
+              <button type="button" className="btn danger solid" onClick={onClose}>Discard</button>
+              <button type="button" className="btn" autoFocus onClick={() => setConfirmClose(false)}>Keep editing</button></>
+          ) : (
+            <><button type="button" className="btn" onClick={close}>Cancel</button>
+              <button type="submit" className="btn primary" disabled={!!busy || !id.trim() || !Object.values(profiles).some(Boolean)}>
+                {busy === 'save' ? <><Spinner />Saving…</> : 'Save'}
+              </button></>
+          )}
         </footer>
       </form>
     </div>
