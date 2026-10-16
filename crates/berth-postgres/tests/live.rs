@@ -9,7 +9,7 @@
 //! An RDS host must also get past TLS with no bundle at all, since its roots ship in the crate.
 
 use berth_core::{Endpoint, Role, TlsMode};
-use berth_postgres::{Session, Target, MAX_ROWS};
+use berth_postgres::{BrowseRequest, Filter, FilterOp, Session, Sort, Target, MAX_ROWS};
 use std::time::Duration;
 
 fn target(user: &str, read_only: bool) -> Option<Target> {
@@ -31,6 +31,14 @@ fn target(user: &str, read_only: bool) -> Option<Target> {
     Some(Target::new(ep, read_only))
 }
 
+fn page_req(limit: u32, offset: u64) -> BrowseRequest {
+    BrowseRequest { limit, offset, ..Default::default() }
+}
+
+fn filter(column: &str, op: FilterOp, value: &str) -> Filter {
+    Filter { column: column.into(), op, value: Some(value.into()), values: vec![] }
+}
+
 async fn app(read_only: bool) -> Option<Session> {
     let t = target("app", read_only)?;
     Some(Session::connect(&t, Some("berth-dev-app")).await.expect("connect as app"))
@@ -42,7 +50,7 @@ async fn lists_and_browses_tables_in_primary_key_order() {
     assert!(s.server_version().await.unwrap().starts_with("16"));
     let tables = s.list_tables().await.unwrap();
     assert!(tables.iter().any(|t| t.schema == "public" && t.name == "users" && t.kind == "table"));
-    let page = s.browse("public", "users", 25, 10).await.unwrap();
+    let page = s.browse("public", "users", &page_req(25, 10)).await.unwrap();
     assert_eq!(page.rows.len(), 25);
     assert_eq!(page.rows[0][0].as_deref(), Some("11"));
     let id = page.columns.iter().find(|c| c.name == "id").unwrap();
@@ -54,9 +62,60 @@ async fn lists_and_browses_tables_in_primary_key_order() {
 #[tokio::test(flavor = "current_thread")]
 async fn browsing_only_accepts_tables_the_catalog_knows() {
     let Some(s) = app(false).await else { return };
-    let err = s.browse("public", "users\"; DROP TABLE users; --", 10, 0).await.unwrap_err();
+    let err = s.browse("public", "users\"; DROP TABLE users; --", &page_req(10, 0)).await.unwrap_err();
     assert!(err.message.contains("does not exist"));
     assert_eq!(s.run("SELECT count(*) FROM users").await.unwrap()[0].rows[0][0].as_deref(), Some("1300"));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn filters_sort_and_count_run_as_bound_parameters() {
+    let Some(s) = app(true).await else { return };
+    let req = |filters: Vec<Filter>| BrowseRequest { filters, limit: 500, offset: 0, ..Default::default() };
+    let pro = req(vec![filter("plan", FilterOp::Eq, "pro")]);
+    let page = s.browse("public", "users", &pro).await.unwrap();
+    assert!(!page.rows.is_empty() && page.rows.iter().all(|r| r[4].as_deref() == Some("pro")));
+    let n = s.count("public", "users", &pro).await.unwrap();
+    let expected = s.run("SELECT count(*) FROM users WHERE plan = 'pro'").await.unwrap()[0].rows[0][0].clone().unwrap();
+    assert_eq!((n.exact, n.total.map(|t| t.to_string())), (true, Some(expected)));
+
+    // Booleans come back as the text of the cast, not the simple protocol's t/f.
+    assert!(page.rows.iter().all(|r| matches!(r[5].as_deref(), Some("true" | "false"))));
+
+    let like = s.browse("public", "users", &req(vec![filter("email", FilterOp::Contains, "USER1")])).await.unwrap();
+    assert!(!like.rows.is_empty() && like.rows.iter().all(|r| r[1].as_deref().unwrap().contains("user1")), "ILIKE is case-insensitive");
+    let starts = s.browse("public", "users", &req(vec![filter("email", FilterOp::StartsWith, "user12")])).await.unwrap();
+    assert!(starts.rows.iter().all(|r| r[1].as_deref().unwrap().starts_with("user12")));
+
+    let nulls = s.browse("public", "users", &req(vec![filter("last_login", FilterOp::IsNull, "")])).await.unwrap();
+    assert!(!nulls.rows.is_empty() && nulls.rows.iter().all(|r| r[7].is_none()));
+
+    let three = Filter { column: "id".into(), op: FilterOp::In, value: None, values: vec!["1".into(), "2".into(), "3".into()] };
+    assert_eq!(s.browse("public", "users", &req(vec![three])).await.unwrap().rows.len(), 3);
+
+    let sorted =
+        BrowseRequest { sort: Some(Sort { column: "last_login".into(), descending: true }), limit: 5, offset: 0, ..Default::default() };
+    let page = s.browse("public", "users", &sorted).await.unwrap();
+    assert!(page.rows.iter().all(|r| r[7].is_some()), "NULLS LAST keeps the nulls off the first page");
+    let times: Vec<&str> = page.rows.iter().map(|r| r[7].as_deref().unwrap()).collect();
+    assert!(times.windows(2).all(|w| w[0] >= w[1]), "{times:?}");
+
+    // A value the column's type cannot hold is a clean server error, not a crash.
+    let bad = s.browse("public", "users", &req(vec![filter("id", FilterOp::Eq, "ten")])).await.unwrap_err();
+    assert_eq!(bad.code.as_deref(), Some("22P02"), "{bad:?}");
+
+    let raw = |w: &str| BrowseRequest { where_: Some(w.into()), limit: 500, offset: 0, ..Default::default() };
+    assert_eq!(s.browse("public", "users", &raw("id < 10")).await.unwrap().rows.len(), 9);
+    assert!(s.browse("public", "users", &raw("1=1; DROP TABLE users")).await.unwrap_err().message.contains("`;`"));
+    assert_eq!(s.run("SELECT count(*) FROM users").await.unwrap()[0].rows[0][0].as_deref(), Some("1300"));
+    // An error inside the condition is reported at a position inside the condition.
+    let err = s.browse("public", "users", &raw("id < 10 AND nope = 1")).await.unwrap_err();
+    assert_eq!((err.code.as_deref(), err.position), (Some("42703"), Some(13)), "{err:?}");
+    // The session is still read-only, whatever the condition tries.
+    let err = s.browse("public", "users", &raw("nextval('users_id_seq') > 0")).await.unwrap_err();
+    assert_eq!(err.code.as_deref(), Some("25006"), "{err:?}");
+
+    let n = s.count("public", "users", &page_req(10, 0)).await.unwrap();
+    assert!(!n.exact && n.total.is_some_and(|t| t >= 1000), "{n:?}");
 }
 
 #[tokio::test(flavor = "current_thread")]

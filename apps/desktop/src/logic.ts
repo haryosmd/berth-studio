@@ -1,5 +1,5 @@
 // Pure helpers for the interface. No DOM and no IPC, so tests/ can run them with node --test.
-import type { Column, Connection, Endpoint, Engine, EnvId, Environment, Json, Profile, Role, Table } from './types';
+import type { Column, Connection, Endpoint, Engine, EnvId, Environment, Filter, FilterOp, Json, Profile, Role, RowCount, Sort, Table } from './types';
 
 /** The environments a new workspace starts with; the Rust side owns the real list. */
 export const DEFAULT_ENVIRONMENTS: Environment[] = [
@@ -69,6 +69,64 @@ export function browseStatus(p: Profile | undefined, production: boolean, canEdi
   if (production) return 'production is read-only';
   if (!p || !hasWrite(p) || p.readOnly) return 'read-only profile';
   return canEdit ? 'editable · changes are reviewed before commit' : 'read-write profile';
+}
+
+/** The filter operators, in menu order. */
+export const OPS: { op: FilterOp; label: string; needsValue: boolean }[] = [
+  { op: 'eq', label: '=', needsValue: true },
+  { op: 'ne', label: '≠', needsValue: true },
+  { op: 'lt', label: '<', needsValue: true },
+  { op: 'le', label: '≤', needsValue: true },
+  { op: 'gt', label: '>', needsValue: true },
+  { op: 'ge', label: '≥', needsValue: true },
+  { op: 'contains', label: 'contains', needsValue: true },
+  { op: 'startsWith', label: 'starts with', needsValue: true },
+  { op: 'isNull', label: 'is null', needsValue: false },
+  { op: 'isNotNull', label: 'is not null', needsValue: false },
+  { op: 'in', label: 'in', needsValue: true },
+];
+
+/** A chip's text: `plan ≠ 'deleted'`, `last_login is null`, `id in (1, 2, 3)`. */
+export function filterText(f: Filter): string {
+  const label = OPS.find(o => o.op === f.op)?.label ?? f.op;
+  if (f.op === 'isNull' || f.op === 'isNotNull') return `${f.column} ${label}`;
+  if (f.op === 'in') return `${f.column} in (${(f.values ?? []).join(', ')})`;
+  return `${f.column} ${label} '${f.value ?? ''}'`;
+}
+
+/** The values of an `in` filter as typed: split on commas or newlines, trimmed, without repeats. */
+export function parseInValues(text: string): string[] {
+  const out: string[] = [];
+  for (const v of text.split(/[,\n]/).map(x => x.trim())) if (v && !out.includes(v)) out.push(v);
+  return out;
+}
+
+/** Indexes of the rows whose any cell contains `needle`, case-insensitively; every row when it is blank. */
+export function findRows(rows: (string | null)[][], needle: string): number[] {
+  const q = needle.trim().toLowerCase();
+  if (!q) return rows.map((_, i) => i);
+  return rows.flatMap((r, i) => (r.some(v => v !== null && v.toLowerCase().includes(q)) ? [i] : []));
+}
+
+/** 1.3k, 8.0k, 2.4M: row counts for the sidebar and footer. */
+export function compact(n: number): string {
+  if (n < 1000) return String(n);
+  if (n < 1_000_000) return `${(n / 1000).toFixed(1)}k`;
+  return `${(n / 1_000_000).toFixed(1)}M`;
+}
+
+/** "Rows 1–200 of 1,300" with an exact count, "Rows 1–200 of ~1.3k" with an estimate, "Rows 1–200" without one. */
+export function rowCountText(offset: number, shown: number, count: RowCount | null): string {
+  if (!shown) return '';
+  const range = `Rows ${(offset + 1).toLocaleString('en-US')}–${(offset + shown).toLocaleString('en-US')}`;
+  if (!count || count.total === null) return range;
+  return count.exact ? `${range} of ${count.total.toLocaleString('en-US')}` : `${range} of ~${compact(count.total)}`;
+}
+
+/** Clicking a header cycles none → ascending → descending → none for that column. */
+export function nextSort(current: Sort | null, column: string): Sort | null {
+  if (!current || current.column !== column) return { column, descending: false };
+  return current.descending ? null : { column, descending: true };
 }
 
 /** Index of an endpoint among the endpoints that share its role (how passwords are matched). */
@@ -150,7 +208,7 @@ export function cellKind(value: string | null, col: Column | undefined): CellKin
   return 'str';
 }
 
-/** Postgres sends booleans as t / f in text form. */
+/** Postgres sends booleans as t / f through the simple protocol and as true / false when cast to text. */
 export function display(value: string | null, col: Column | undefined): string {
   if (value === null) return 'NULL';
   if (col?.typeName === 'boolean') return value === 't' ? 'true' : value === 'f' ? 'false' : value;

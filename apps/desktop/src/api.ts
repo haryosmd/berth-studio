@@ -2,8 +2,8 @@
 // src-tauri/capabilities/main.json. In a plain browser (design review), a mock with sample data
 // stands in; it is only loaded in development builds.
 import type {
-  CollectionInfo, Connection, DocumentWrite, Documents, EndpointCheck, Engine, EnvId, Environment, FindRequest, MongoOverview,
-  Page, PasswordInput, Profile, RouteMode, RunResult, Table, UpdateInfo, UpdateProgress,
+  BrowseRequest, CollectionInfo, Connection, DocumentWrite, Documents, EndpointCheck, Engine, EnvId, Environment, FindRequest, MongoOverview,
+  Page, PasswordInput, Profile, RouteMode, RowCount, RunResult, Table, UpdateInfo, UpdateProgress,
 } from './types';
 
 type Invoke = <T>(cmd: string, args?: Record<string, unknown>) => Promise<T>;
@@ -33,8 +33,10 @@ export const api = {
     call<EndpointCheck[]>('test_profile', { id, engine, env, profile, passwords }),
 
   listTables: (id: string, env: EnvId) => call<Table[]>('list_tables', { id, env }),
-  browseTable: (id: string, env: EnvId, schema: string, table: string, limit: number, offset: number) =>
-    call<Page>('browse_table', { id, env, schema, table, limit, offset }),
+  browseTable: (id: string, env: EnvId, schema: string, table: string, request: BrowseRequest) =>
+    call<Page>('browse_table', { id, env, schema, table, request }),
+  countRows: (id: string, env: EnvId, schema: string, table: string, request: BrowseRequest) =>
+    call<RowCount>('count_rows', { id, env, schema, table, request }),
   runQuery: (id: string, env: EnvId, sql: string, mode: RouteMode, confirm: string | null, runId: string) =>
     call<RunResult>('run_query', { id, env, sql, mode, confirm, runId }),
   cancelQuery: (runId: string) => call<boolean>('cancel_query', { runId }),

@@ -8,7 +8,7 @@ import { QueryView } from './QueryView';
 import { TableView } from './TableView';
 import { Spinner, TreeNote } from './Status';
 import { UpdateButton } from './UpdateButton';
-import { DEFAULT_ENVIRONMENTS, browseStatus, effectiveEnv, findEnv, groupBySchema, hasRead, hasWrite, matchesFilter } from './logic';
+import { DEFAULT_ENVIRONMENTS, browseStatus, compact, effectiveEnv, findEnv, groupBySchema, hasRead, hasWrite, matchesFilter } from './logic';
 import type { CollectionInfo, Connection, DbError, EnvId, Environment, MongoOverview, Role, Table } from './types';
 
 /** What the footer shows for the active tab. `browse` marks a table tab, whose session is read-only whatever the profile allows. */
@@ -408,6 +408,3 @@ export function App() {
   );
 }
 
-function compact(n: number): string {
-  return n >= 1_000_000 ? `${(n / 1_000_000).toFixed(1)}M` : n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n);
-}

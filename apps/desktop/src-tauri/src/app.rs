@@ -14,7 +14,7 @@ use berth_core::{
     Kind, Profile, Role, RouteMode, RouteOptions,
 };
 use berth_mongo::{CollectionInfo, Documents, FindRequest, MongoError, ServerInfo};
-use berth_postgres::{Canceller, DbError, ResultSet, Session, Table, Target};
+use berth_postgres::{BrowseRequest, Canceller, DbError, ResultSet, RowCount, Session, Table, Target};
 use berth_secrets::{account, account_of, reference, SecretStore};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -408,11 +408,15 @@ impl App {
         self.reader(id, env).await?.0.list_tables().await
     }
 
-    pub async fn browse_table(&self, id: &str, env: &EnvId, schema: &str, table: &str, limit: u32, offset: u64) -> Result<Page, DbError> {
+    pub async fn browse_table(&self, id: &str, env: &EnvId, schema: &str, table: &str, request: &BrowseRequest) -> Result<Page, DbError> {
         let (s, host) = self.reader(id, env).await?;
         let t = Instant::now();
-        let set = s.browse(schema, table, limit, offset).await?;
+        let set = s.browse(schema, table, request).await?;
         Ok(Page { set, host, elapsed_ms: t.elapsed().as_millis() as u64 })
+    }
+
+    pub async fn count_rows(&self, id: &str, env: &EnvId, schema: &str, table: &str, request: &BrowseRequest) -> Result<RowCount, DbError> {
+        self.reader(id, env).await?.0.count(schema, table, request).await
     }
 
     pub async fn run_query(
@@ -611,6 +615,7 @@ fn mongo_target(e: &Endpoint, p: &Profile, read_only: bool) -> berth_mongo::Targ
 mod tests {
     use super::*;
     use berth_core::{default_environments, ReadPreference, TlsMode};
+    use berth_postgres::{Filter, FilterOp};
     use berth_secrets::MemoryStore;
     use std::collections::BTreeMap;
 
@@ -826,8 +831,21 @@ mod tests {
 
         let tables = a.list_tables("acme-db", &dev).await.unwrap();
         assert!(tables.iter().any(|t| t.name == "orders"));
-        let page = a.browse_table("acme-db", &dev, "public", "orders", 100, 0).await.unwrap();
+        let page = a
+            .browse_table("acme-db", &dev, "public", "orders", &BrowseRequest { limit: 100, offset: 0, ..Default::default() })
+            .await
+            .unwrap();
         assert_eq!(page.set.rows.len(), 100);
+        let filtered = BrowseRequest {
+            filters: vec![Filter { column: "status".into(), op: FilterOp::Eq, value: Some("paid".into()), values: vec![] }],
+            limit: 10,
+            offset: 0,
+            ..Default::default()
+        };
+        let n = a.count_rows("acme-db", &dev, "public", "orders", &filtered).await.unwrap();
+        assert!(n.exact && n.total.is_some_and(|t| t > 0), "{n:?}");
+        let page = a.browse_table("acme-db", &dev, "public", "orders", &filtered).await.unwrap();
+        assert!(page.set.rows.iter().all(|r| r[2].as_deref() == Some("paid")));
 
         let checks = a.test_profile("acme-db", Engine::Postgres, &dev, conn().profiles[&dev].clone(), vec![]).await.unwrap();
         assert!(checks.iter().all(|c| c.ok), "{checks:?}");

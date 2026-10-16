@@ -1,7 +1,9 @@
 // Sample backend for previewing the interface in a browser during development. Never bundled in a
 // production build (see api.ts) and never talks to a database. It mirrors the Rust rules that
 // matter for the screens: production writes need the typed name, read-only profiles cannot write.
-import type { CollectionInfo, Connection, Documents, Environment, Json, Page, ResultSet, RunResult, Table } from './types';
+import type {
+  BrowseRequest, CollectionInfo, Connection, Documents, Environment, Filter, Json, Page, ResultSet, RunResult, Table,
+} from './types';
 import { DEFAULT_ENVIRONMENTS } from './logic';
 
 let envs: Environment[] = structuredClone(DEFAULT_ENVIRONMENTS);
@@ -46,15 +48,58 @@ const conns: Connection[] = [
 
 const tables: Table[] = ['orders', 'orgs', 'users'].map((name, i) => ({ schema: 'public', name, kind: 'table', estimatedRows: [8000, 20, 1300][i] }));
 
-function users(offset: number, limit: number): ResultSet {
-  const rows = Array.from({ length: Math.min(limit, 1300 - offset) }, (_, k) => {
-    const g = offset + k + 1;
-    return [String(g), `user${g}@acme.dev`, `User ${g}`, String(1 + (g % 20)), ['starter', 'pro', 'team'][g % 3], g % 4 ? 't' : 'f',
-      g % 5 ? `{"source": "${['signup', 'invite', 'import'][g % 3]}"}` : null, g % 7 ? `2026-10-14 ${String(g % 24).padStart(2, '0')}:00:00+07` : null];
-  });
+const USER_COLUMNS = (() => {
   const t = ['integer', 'text', 'text', 'integer', 'text', 'boolean', 'jsonb', 'timestamp with time zone'];
   const names = ['id', 'email', 'full_name', 'org_id', 'plan', 'is_verified', 'metadata', 'last_login'];
-  return { columns: names.map((name, i) => ({ name, typeName: t[i], primaryKey: i === 0 })), rows, truncated: false, affected: rows.length };
+  return names.map((name, i) => ({ name, typeName: t[i], primaryKey: i === 0 }));
+})();
+const ALL_USERS: (string | null)[][] = Array.from({ length: 1300 }, (_, k) => {
+  const g = k + 1;
+  return [String(g), `user${g}@acme.dev`, `User ${g}`, String(1 + (g % 20)), ['starter', 'pro', 'team'][g % 3], g % 4 ? 'true' : 'false',
+    g % 5 ? `{"source": "${['signup', 'invite', 'import'][g % 3]}"}` : null, g % 7 ? `2026-10-14 ${String(g % 24).padStart(2, '0')}:00:00+07` : null];
+});
+
+function matches(row: (string | null)[], f: Filter): boolean {
+  const i = USER_COLUMNS.findIndex(c => c.name === f.column);
+  if (i < 0) throw { message: `Unknown column ${f.column}.` };
+  const v = row[i];
+  const num = USER_COLUMNS[i].typeName === 'integer';
+  const cmp = (a: string, b: string) => (num ? Number(a) - Number(b) : a.localeCompare(b));
+  switch (f.op) {
+    case 'isNull': return v === null;
+    case 'isNotNull': return v !== null;
+    case 'in': return v !== null && (f.values ?? []).includes(v);
+    case 'contains': return v !== null && v.toLowerCase().includes((f.value ?? '').toLowerCase());
+    case 'startsWith': return v !== null && v.toLowerCase().startsWith((f.value ?? '').toLowerCase());
+    default: {
+      if (v === null) return false;
+      if (num && Number.isNaN(Number(f.value))) throw { message: `invalid input syntax for type integer: "${f.value}"`, code: '22P02' };
+      const c = cmp(v, f.value ?? '');
+      return f.op === 'eq' ? c === 0 : f.op === 'ne' ? c !== 0 : f.op === 'lt' ? c < 0 : f.op === 'le' ? c <= 0 : f.op === 'gt' ? c > 0 : c >= 0;
+    }
+  }
+}
+
+/** The mock understands chips and sort; a raw condition is accepted but only `;` is checked. */
+function selectUsers(req: Partial<BrowseRequest>): (string | null)[][] {
+  if (req.where && req.where.includes(';')) throw { message: 'The condition is one expression for WHERE; it cannot hold `;`.' };
+  let rows = ALL_USERS.filter(r => (req.filters ?? []).every(f => matches(r, f)));
+  if (req.sort) {
+    const i = USER_COLUMNS.findIndex(c => c.name === req.sort!.column);
+    const num = USER_COLUMNS[i]?.typeName === 'integer';
+    rows = [...rows].sort((a, b) => {
+      const x = a[i], y = b[i];
+      if (x === null || y === null) return x === y ? 0 : x === null ? 1 : -1;
+      const c = num ? Number(x) - Number(y) : x.localeCompare(y);
+      return req.sort!.descending ? -c : c;
+    });
+  }
+  return rows;
+}
+
+function users(offset: number, limit: number, req: Partial<BrowseRequest> = {}): ResultSet {
+  const rows = selectUsers(req).slice(offset, offset + limit);
+  return { columns: USER_COLUMNS, rows, truncated: false, affected: rows.length };
 }
 
 const types = ['click', 'view', 'purchase'];
@@ -103,7 +148,11 @@ export async function invoke<T>(cmd: string, args: Record<string, any> = {}): Pr
     case 'delete_connection': conns.splice(conns.findIndex(x => x.id === args.id), 1); return undefined as T;
     case 'test_profile': return (args.profile.endpoints as any[]).map((e, index) => ({ role: e.role, index, host: e.uri ?? e.host, ok: true, message: args.engine === 'mongodb' ? 'MongoDB 8.0.34 · replica set rs0' : 'PostgreSQL 16.15' })) as T;
     case 'list_tables': return tables as T;
-    case 'browse_table': return { ...users(args.offset, args.limit), host: 'db-r.dev.acme.internal', elapsedMs: 7 } as Page as T;
+    case 'browse_table': { const r = args.request as BrowseRequest; return { ...users(r.offset, r.limit, r), host: 'db-r.dev.acme.internal', elapsedMs: 7 } as Page as T; }
+    case 'count_rows': {
+      const r = args.request as BrowseRequest;
+      return (r.filters.length || r.where ? { total: selectUsers(r).length, exact: true } : { total: 1300, exact: false }) as T;
+    }
     case 'run_query': {
       const write = /^\s*(update|insert|delete|create|drop|alter)/i.test(args.sql);
       const p = conns.find(c => c.id === args.id)?.profiles[args.env];
