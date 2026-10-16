@@ -28,6 +28,9 @@ input, textarea, select { user-select: text; -webkit-user-select: text; }
 }
 .titlebar .brand { display: flex; align-items: center; gap: 8px; font-weight: 600; }
 .titlebar .spacer { flex: 1; align-self: stretch; }
+/* Splits the environment controls from app-level ones (appearance, updates). */
+.titlebar .sep { width: 1px; height: 16px; background: var(--line); flex: none; }
+.target.appearance { color: var(--fg-2); }
 .seg { display: inline-flex; padding: 2px; gap: 2px; border-radius: 7px; background: var(--sunk); border: 1px solid var(--line); }
 .seg button { display: inline-flex; align-items: center; gap: 6px; height: 22px; padding: 0 10px; border-radius: 5px; color: var(--fg-2); }
 .seg button[aria-pressed="true"] { background: var(--raise); color: var(--fg); box-shadow: 0 1px 2px rgba(0,0,0,.08), 0 0 0 1px var(--line); }
