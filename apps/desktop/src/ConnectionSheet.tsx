@@ -180,7 +180,7 @@ export function ConnectionSheet({ existing, startEnv, environments, onClose, onS
                   </div>
                   {e.tls !== 'disable' && (
                     <label className="field"><span>CA certificate, optional: a PEM file trusted besides the system store, such as the Amazon RDS bundle</span>
-                      <input className="input mono" value={e.caCert ?? ''} placeholder="~/Downloads/ap-southeast-1-bundle.pem" spellCheck={false}
+                      <input className="input mono" value={e.caCert ?? ''} placeholder="None: only the system trust store" spellCheck={false}
                         onChange={x => setEp(i, { caCert: x.target.value || undefined })} />
                     </label>
                   )}
