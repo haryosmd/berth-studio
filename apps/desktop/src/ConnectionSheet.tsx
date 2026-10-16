@@ -167,6 +167,12 @@ export function ConnectionSheet({ existing, startEnv, environments, onClose, onS
                     </label>
                     {passwordField(i, e)}
                   </div>
+                  {e.tls !== 'disable' && (
+                    <label className="field"><span>CA certificate, optional: a PEM file trusted besides the system store, such as the Amazon RDS bundle</span>
+                      <input className="input mono" value={e.caCert ?? ''} placeholder="~/Downloads/ap-southeast-1-bundle.pem" spellCheck={false}
+                        onChange={x => setEp(i, { caCert: x.target.value || undefined })} />
+                    </label>
+                  )}
                 </div>
               ))}
               <div><button type="button" className="btn" onClick={() => setProfile({ ...p, endpoints: [...p.endpoints, blankEndpoint('read', p.endpoints.find(x => x.role === 'write') ?? p.endpoints[0])] })}>

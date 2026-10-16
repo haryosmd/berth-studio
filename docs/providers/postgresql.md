@@ -6,7 +6,9 @@ Crate: `crates/berth-postgres`. Driver: `tokio-postgres` 0.7 with rustls.
 
 - **One session per endpoint.** A profile has at most one `write` endpoint (the primary) and any number of `read` endpoints (replicas). A profile with only read endpoints is valid; it can only read.
 - **Authentication:** password, negotiated by the server (SCRAM-SHA-256 on modern servers). The password comes from the Keychain and is never part of a connection string.
-- **TLS:** `auto` requires TLS for every host except `localhost`, `127.0.0.1` and `::1`. Certificates and host names are verified against the system trust store (`rustls-platform-verifier`). `require` and `disable` can be set per endpoint.
+- **TLS:** `auto` requires TLS for every host except `localhost`, `127.0.0.1` and `::1`. Certificates and host names are verified against the system trust store (`rustls-platform-verifier`), so `require` is libpq's `verify-full`, not its `require`. `require` and `disable` can be set per endpoint.
+- **Extra CA certificates:** an endpoint can name a PEM file whose certificates are trusted besides the system store. Amazon RDS and Aurora need this: their certificates are signed by Amazon's own RDS CA, which macOS does not ship, so without it the handshake fails with `invalid peer certificate: UnknownIssuer`. Use the regional bundle, for example `https://truststore.pki.rds.amazonaws.com/ap-southeast-1/ap-southeast-1-bundle.pem`.
+- **Connection errors** carry every cause, for example `error performing TLS handshake: invalid peer certificate: UnknownIssuer`.
 - **Session setup:** `SET statement_timeout` (30 s by default) on every session. Sessions on read endpoints and read-only profiles also `SET default_transaction_read_only = on`, so the server refuses writes with SQLSTATE `25006`.
 - **Application name:** `Berth Studio`, visible in `pg_stat_activity`.
 

@@ -632,6 +632,7 @@ mod tests {
             uri: None,
             auth_source: None,
             tls: TlsMode::Auto,
+            ca_cert: None,
             secret: None,
             needs_secret: false,
         }
@@ -662,6 +663,7 @@ mod tests {
             uri: Some(format!("mongodb://{addr}/?replicaSet=rs0")),
             auth_source: Some("events".into()),
             tls: TlsMode::Auto,
+            ca_cert: None,
             secret: None,
             needs_secret: false,
         };
