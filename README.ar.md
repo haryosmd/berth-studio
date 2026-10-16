@@ -8,15 +8,15 @@
 </p>
 
 <p align="center">
-  <a href="README.md">English</a> ·
-  <a href="README.id.md">Bahasa Indonesia</a> ·
-  <a href="README.zh-CN.md">简体中文</a> ·
-  <a href="README.ja.md">日本語</a> ·
-  <b>العربية</b> ·
-  <a href="README.ru.md">Русский</a>
+  🇬🇧 <a href="README.md">English</a> ·
+  🇮🇩 <a href="README.id.md">Bahasa Indonesia</a> ·
+  🇨🇳 <a href="README.zh-CN.md">简体中文</a> ·
+  🇯🇵 <a href="README.ja.md">日本語</a> ·
+  🇸🇦 <b>العربية</b> ·
+  🇷🇺 <a href="README.ru.md">Русский</a>
 </p>
 
-> **تنبيه:** ما زال Berth Studio في بداية التطوير. يعمل أول إصدار من تطبيق سطح المكتب من الشيفرة المصدرية على macOS ويتصل بـ PostgreSQL، لكن لا توجد نسخة للتنزيل بعد. ويُظهر النموذج الأولي التفاعلي الوجهة التي يسير إليها.
+> **تنبيه:** ما زال Berth Studio في بداية التطوير. يمكن [تنزيل](https://github.com/haryosmd/berth-studio/releases/latest) تطبيق macOS، وهو يتصل بـ PostgreSQL وMongoDB. ويُظهر النموذج الأولي التفاعلي الوجهة التي يسير إليها.
 
 ## لماذا Berth Studio؟
 
@@ -50,7 +50,13 @@
 
 ## جرّبه
 
-### شغّل التطبيق (macOS)
+### نزّل التطبيق (macOS)
+
+احصل على أحدث ملف `.dmg` من [صفحة الإصدارات](https://github.com/haryosmd/berth-studio/releases/latest). بناء واحد يعمل على أجهزة Mac بمعالجات Apple silicon وIntel معًا. افتح ملف `.dmg` واسحب Berth Studio إلى مجلد التطبيقات.
+
+لم يُوقَّع التطبيق بعد بمعرّف Apple Developer ID، لذا يمنع macOS تشغيله في المرة الأولى. افتح **إعدادات النظام ← الخصوصية والأمان**، ثم مرّر للأسفل واختر **فتح على أي حال**. تصل الإصدارات اللاحقة عبر أداة التحديث داخل التطبيق، التي لا تثبّت أي تحديث إلا إذا صحّ توقيعه.
+
+### شغّله من الشيفرة المصدرية (macOS)
 
 تحتاج إلى Rust (عبر `rustup`) وNode.js 20 أو أحدث وأدوات سطر أوامر Xcode. يستغرق البناء الأول بضع دقائق. يشغّل الأمر الثاني قاعدة PostgreSQL مؤقتة فيها بيانات تجريبية على `127.0.0.1:54329` (المستخدم `app` وكلمة المرور `berth-dev-app`، ويحذفها `scripts/dev-db/stop.sh`). ولتجربة MongoDB، ثبّت `mongodb-community@8.0` من Homebrew ثم شغّل `scripts/dev-db/mongo-start.sh`، فتعمل مجموعة نسخ (replica set) مؤقتة على `127.0.0.1:54330` (المستخدم `app` وكلمة المرور `berth-dev-app` وقاعدة المصادقة `events`).
 
@@ -59,6 +65,20 @@ npm ci
 scripts/dev-db/start.sh
 npm run tauri dev
 ```
+
+### الاتصال بقاعدة بيانات في السحابة
+
+قواعد البيانات المُدارة مثل Amazon RDS وAurora وAzure Database وGoogle Cloud SQL وDigitalOcean توقّع شهادات خوادمها بسلطة شهادات (CA) خاصة بالمزوّد، ولا يثق بها macOS افتراضيًا. يتحقق Berth Studio من الشهادة على أي حال، لذا يفشل اختبار الاتصال برسالة `invalid peer certificate: UnknownIssuer` إلى أن تزوّده بشهادة CA الخاصة بالمزوّد.
+
+1. نزّل شهادة CA (ملف `.pem`) من مزوّدك. تجدها عادةً في صفحة الاتصال بقاعدة البيانات باسم "CA certificate" أو "root certificate" أو "SSL certificate":
+   - **Amazon RDS وAurora:** حزمة لكل منطقة، أو الحزمة العالمية، من [مخزن الثقة الخاص بـ RDS](https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/UsingWithRDS.SSL.html).
+   - **Azure Database for PostgreSQL:** الشهادات الجذرية المذكورة في [وثائق TLS](https://learn.microsoft.com/azure/postgresql/flexible-server/concepts-networking-ssl-tls).
+   - **Google Cloud SQL:** شهادة CA الخاصة بالخادم في صفحة **Connections** للمثيل، انظر [الوثائق](https://cloud.google.com/sql/docs/postgres/configure-ssl-instance).
+   - **DigitalOcean:** شهادة CA في صفحة **Overview** لقاعدة البيانات، انظر [الوثائق](https://docs.digitalocean.com/products/databases/postgresql/how-to/connect/).
+2. في نافذة اتصال PostgreSQL، ضع مسار الملف في حقل **CA certificate** ضمن ملف تعريف تلك البيئة. يمكن أن يبدأ المسار بـ `~`.
+3. اضغط **Test**. يُقرأ الملف عند كل اتصال، فاتركه في مكانه.
+
+يضيف ملف CA إلى مخزن ثقة النظام ولا يستبدله. قواعد البيانات على جهازك أو التي أُوقف فيها TLS لا تحتاج إليه.
 
 ### افتح النموذج الأولي
 

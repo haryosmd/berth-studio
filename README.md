@@ -6,15 +6,15 @@
 </p>
 
 <p align="center">
-  <b>English</b> ·
-  <a href="README.id.md">Bahasa Indonesia</a> ·
-  <a href="README.zh-CN.md">简体中文</a> ·
-  <a href="README.ja.md">日本語</a> ·
-  <a href="README.ar.md">العربية</a> ·
-  <a href="README.ru.md">Русский</a>
+  🇬🇧 <b>English</b> ·
+  🇮🇩 <a href="README.id.md">Bahasa Indonesia</a> ·
+  🇨🇳 <a href="README.zh-CN.md">简体中文</a> ·
+  🇯🇵 <a href="README.ja.md">日本語</a> ·
+  🇸🇦 <a href="README.ar.md">العربية</a> ·
+  🇷🇺 <a href="README.ru.md">Русский</a>
 </p>
 
-> **Heads up:** Berth Studio is in early development. The first desktop app runs from source on macOS and talks to PostgreSQL, but there's no download yet. The clickable prototype shows where it's heading.
+> **Heads up:** Berth Studio is in early development. The macOS app can be [downloaded](https://github.com/haryosmd/berth-studio/releases/latest) and talks to PostgreSQL and MongoDB. The clickable prototype shows where it's heading.
 
 ## Why Berth Studio?
 
@@ -48,7 +48,13 @@ Berth Studio puts all of that in one window, and it treats production with the c
 
 ## Try it
 
-### Run the app (macOS)
+### Download the app (macOS)
+
+Grab the latest `.dmg` from the [releases page](https://github.com/haryosmd/berth-studio/releases/latest). One build runs on both Apple silicon and Intel Macs. Open the `.dmg` and drag Berth Studio into Applications.
+
+The app isn't signed with an Apple Developer ID yet, so macOS blocks the first launch. Open **System Settings → Privacy & Security**, scroll down and choose **Open Anyway**. Later versions arrive through the in-app updater, which only installs an update whose signature checks out.
+
+### Run from source (macOS)
 
 You need Rust (via `rustup`), Node.js 20 or newer, and the Xcode Command Line Tools. The first build takes a few minutes. The second command starts a throwaway PostgreSQL with sample data on `127.0.0.1:54329` (user `app`, password `berth-dev-app`; `scripts/dev-db/stop.sh` removes it again). For MongoDB, install `mongodb-community@8.0` from Homebrew and run `scripts/dev-db/mongo-start.sh`: a throwaway replica set on `127.0.0.1:54330` (user `app`, password `berth-dev-app`, auth database `events`).
 
@@ -57,6 +63,20 @@ npm ci
 scripts/dev-db/start.sh
 npm run tauri dev
 ```
+
+### Connect to a database in the cloud
+
+Managed databases such as Amazon RDS and Aurora, Azure Database, Google Cloud SQL or DigitalOcean sign their server certificates with the provider's own CA, which macOS doesn't trust out of the box. Berth Studio checks the certificate anyway, so the connection test fails with `invalid peer certificate: UnknownIssuer` until you give it the provider's CA.
+
+1. Download the CA certificate (a `.pem` file) from your provider. It's usually on the database's connection page, called "CA certificate", "root certificate" or "SSL certificate":
+   - **Amazon RDS and Aurora:** one bundle per region, or the global bundle, from the [RDS trust store](https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/UsingWithRDS.SSL.html).
+   - **Azure Database for PostgreSQL:** the root certificates listed in the [TLS docs](https://learn.microsoft.com/azure/postgresql/flexible-server/concepts-networking-ssl-tls).
+   - **Google Cloud SQL:** the server CA on the instance's **Connections** page, see [the docs](https://cloud.google.com/sql/docs/postgres/configure-ssl-instance).
+   - **DigitalOcean:** the CA certificate on the database's **Overview** page, see [the docs](https://docs.digitalocean.com/products/databases/postgresql/how-to/connect/).
+2. In the connection sheet of a PostgreSQL connection, put the file's path into the **CA certificate** field of that environment's profile. A path may start with `~`.
+3. Click **Test**. The file is read on every connection, so keep it where it is.
+
+The CA file adds to the system trust store; it never replaces it. Databases on your own machine, or with TLS off, don't need one.
 
 ### Open the prototype
 

@@ -6,15 +6,15 @@
 </p>
 
 <p align="center">
-  <a href="README.md">English</a> ·
-  <b>Bahasa Indonesia</b> ·
-  <a href="README.zh-CN.md">简体中文</a> ·
-  <a href="README.ja.md">日本語</a> ·
-  <a href="README.ar.md">العربية</a> ·
-  <a href="README.ru.md">Русский</a>
+  🇬🇧 <a href="README.md">English</a> ·
+  🇮🇩 <b>Bahasa Indonesia</b> ·
+  🇨🇳 <a href="README.zh-CN.md">简体中文</a> ·
+  🇯🇵 <a href="README.ja.md">日本語</a> ·
+  🇸🇦 <a href="README.ar.md">العربية</a> ·
+  🇷🇺 <a href="README.ru.md">Русский</a>
 </p>
 
-> **Catatan:** Berth Studio masih tahap awal pengembangan. Aplikasi desktop pertamanya sudah bisa dijalankan dari source di macOS dan terhubung ke PostgreSQL, tapi belum ada versi yang bisa diunduh. Prototype yang bisa diklik menunjukkan arah tujuannya.
+> **Catatan:** Berth Studio masih tahap awal pengembangan. Aplikasi macOS-nya sudah bisa [diunduh](https://github.com/haryosmd/berth-studio/releases/latest) dan terhubung ke PostgreSQL dan MongoDB. Prototype yang bisa diklik menunjukkan arah tujuannya.
 
 ## Kenapa Berth Studio?
 
@@ -48,7 +48,13 @@ Berth Studio nyatuin semuanya dalam satu jendela, dan tetap memperlakukan produc
 
 ## Coba sekarang
 
-### Jalankan aplikasinya (macOS)
+### Unduh aplikasinya (macOS)
+
+Ambil `.dmg` terbaru dari [halaman rilis](https://github.com/haryosmd/berth-studio/releases/latest). Satu build jalan di Mac Apple silicon maupun Intel. Buka `.dmg`-nya, lalu seret Berth Studio ke Applications.
+
+Aplikasinya belum ditandatangani dengan Apple Developer ID, jadi macOS memblokir saat pertama kali dibuka. Buka **System Settings → Privacy & Security**, gulir ke bawah, lalu pilih **Open Anyway**. Versi berikutnya datang lewat updater di dalam aplikasi, yang hanya memasang update kalau tanda tangannya terbukti asli.
+
+### Jalankan dari source (macOS)
 
 Kamu butuh Rust (lewat `rustup`), Node.js 20 atau lebih baru, dan Xcode Command Line Tools. Build pertama makan waktu beberapa menit. Perintah kedua menyalakan PostgreSQL sementara berisi data contoh di `127.0.0.1:54329` (user `app`, password `berth-dev-app`; `scripts/dev-db/stop.sh` menghapusnya lagi). Untuk MongoDB, install `mongodb-community@8.0` dari Homebrew lalu jalankan `scripts/dev-db/mongo-start.sh`: replica set sementara di `127.0.0.1:54330` (user `app`, password `berth-dev-app`, auth database `events`).
 
@@ -57,6 +63,20 @@ npm ci
 scripts/dev-db/start.sh
 npm run tauri dev
 ```
+
+### Hubungkan ke database di cloud
+
+Database terkelola seperti Amazon RDS dan Aurora, Azure Database, Google Cloud SQL, atau DigitalOcean menandatangani sertifikat servernya dengan CA milik penyedia, yang nggak dipercaya macOS secara bawaan. Berth Studio tetap memeriksa sertifikatnya, jadi tes koneksi gagal dengan `invalid peer certificate: UnknownIssuer` sampai kamu kasih CA penyedianya.
+
+1. Unduh sertifikat CA (file `.pem`) dari penyedia kamu. Biasanya ada di halaman koneksi database-nya, dengan nama "CA certificate", "root certificate", atau "SSL certificate":
+   - **Amazon RDS dan Aurora:** satu bundle per region, atau bundle global, dari [RDS trust store](https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/UsingWithRDS.SSL.html).
+   - **Azure Database for PostgreSQL:** root certificate yang tercantum di [dokumentasi TLS](https://learn.microsoft.com/azure/postgresql/flexible-server/concepts-networking-ssl-tls).
+   - **Google Cloud SQL:** server CA di halaman **Connections** instance-nya, lihat [dokumentasinya](https://cloud.google.com/sql/docs/postgres/configure-ssl-instance).
+   - **DigitalOcean:** CA certificate di halaman **Overview** database-nya, lihat [dokumentasinya](https://docs.digitalocean.com/products/databases/postgresql/how-to/connect/).
+2. Di lembar koneksi PostgreSQL, isi path file-nya ke kolom **CA certificate** di profil environment itu. Path boleh diawali `~`.
+3. Klik **Test**. File-nya dibaca setiap kali tersambung, jadi biarkan di tempatnya.
+
+File CA menambah trust store sistem, bukan menggantikannya. Database di komputer sendiri, atau yang TLS-nya mati, nggak butuh ini.
 
 ### Buka prototype
 
