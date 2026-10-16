@@ -10,6 +10,7 @@ const COMMANDS: &[&str] = &[
     "list_tables",
     "browse_table",
     "count_rows",
+    "describe_table",
     "run_query",
     "cancel_query",
     "mongo_overview",

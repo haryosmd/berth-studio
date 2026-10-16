@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import {
   DEFAULT_ENVIRONMENTS, swapEnvToken, copyProfile, cellKind, display, roleIndex, lineCol, shortType, blankProfile, effectiveEnv,
   hasWrite, nextEnvId, validEnvId, documentsToGrid, cellText, bsonType, idText, formatBytes, groupBySchema, matchesFilter, browseStatus,
-  filterText, parseInValues, findRows, rowCountText, nextSort, compact,
+  filterText, parseInValues, findRows, rowCountText, nextSort, compact, attachForeignKeys, fkFilters, fkLabel, tableLabel,
 } from '../src/logic.ts';
 
 const [dev, staging, prod] = DEFAULT_ENVIRONMENTS;
@@ -148,6 +148,22 @@ test('the footer shows the range and an exact or estimated total', () => {
   assert.equal(compact(999), '999');
   assert.equal(compact(8000), '8.0k');
   assert.equal(compact(2_400_000), '2.4M');
+});
+
+test('foreign keys annotate columns and turn a row into chips for the other side', () => {
+  const columns = [{ name: 'id', primaryKey: true }, { name: 'org_id', primaryKey: false }, { name: 'region', primaryKey: false }];
+  const fk = { name: 'users_org_fkey', schema: 'public', table: 'users', columns: ['org_id', 'region'], refSchema: 'billing', refTable: 'orgs', refColumns: ['id', 'region'] };
+  const annotated = attachForeignKeys(columns, [fk]);
+  assert.equal(annotated[0].fk, undefined);
+  assert.deepEqual(annotated[1].fk, { schema: 'billing', table: 'orgs', column: 'id' });
+  assert.deepEqual(annotated[2].fk, { schema: 'billing', table: 'orgs', column: 'region' });
+  assert.equal(fkLabel(annotated[1].fk), '→ billing.orgs.id');
+  assert.equal(fkLabel({ schema: 'public', table: 'orgs', column: 'id' }), '→ orgs.id');
+  assert.equal(tableLabel('public', 'users'), 'users');
+  assert.deepEqual(fkFilters(fk, ['7', '5', 'eu'], columns, 'out'), [{ column: 'id', op: 'eq', value: '5' }, { column: 'region', op: 'eq', value: 'eu' }]);
+  assert.equal(fkFilters(fk, ['7', null, 'eu'], columns, 'out'), null, 'a NULL key points nowhere');
+  const orgColumns = [{ name: 'id', primaryKey: true }, { name: 'region', primaryKey: false }];
+  assert.deepEqual(fkFilters(fk, ['5', 'eu'], orgColumns, 'in'), [{ column: 'org_id', op: 'eq', value: '5' }, { column: 'region', op: 'eq', value: 'eu' }]);
 });
 
 test('a header click cycles the sort', () => {

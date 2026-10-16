@@ -3,7 +3,7 @@
 // stands in; it is only loaded in development builds.
 import type {
   BrowseRequest, CollectionInfo, Connection, DocumentWrite, Documents, EndpointCheck, Engine, EnvId, Environment, FindRequest, MongoOverview,
-  Page, PasswordInput, Profile, RouteMode, RowCount, RunResult, Table, UpdateInfo, UpdateProgress,
+  Page, PasswordInput, Profile, RouteMode, RowCount, RunResult, Table, TableInfo, UpdateInfo, UpdateProgress,
 } from './types';
 
 type Invoke = <T>(cmd: string, args?: Record<string, unknown>) => Promise<T>;
@@ -37,6 +37,7 @@ export const api = {
     call<Page>('browse_table', { id, env, schema, table, request }),
   countRows: (id: string, env: EnvId, schema: string, table: string, request: BrowseRequest) =>
     call<RowCount>('count_rows', { id, env, schema, table, request }),
+  describeTable: (id: string, env: EnvId, schema: string, table: string) => call<TableInfo>('describe_table', { id, env, schema, table }),
   runQuery: (id: string, env: EnvId, sql: string, mode: RouteMode, confirm: string | null, runId: string) =>
     call<RunResult>('run_query', { id, env, sql, mode, confirm, runId }),
   cancelQuery: (runId: string) => call<boolean>('cancel_query', { runId }),

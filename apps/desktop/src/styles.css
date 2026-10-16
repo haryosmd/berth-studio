@@ -141,7 +141,7 @@ input[type="checkbox"] { accent-color: var(--accent); }
 .crumb > span, .crumb > b { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .crumb b { color: var(--fg); font-weight: 600; }
 .crumb svg { flex: none; color: var(--fg-3); }
-.gridfoot { display: flex; align-items: center; gap: 12px; padding: 5px 12px; border-top: 1px solid var(--line); font-size: 11.5px; color: var(--fg-2); font-variant-numeric: tabular-nums; }
+.gridfoot { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; padding: 5px 12px; border-top: 1px solid var(--line); font-size: 11.5px; color: var(--fg-2); font-variant-numeric: tabular-nums; }
 
 /* ---------- table filters ---------- */
 .filters { display: flex; align-items: center; gap: 6px; padding: 6px 12px; border-bottom: 1px solid var(--line); flex-wrap: wrap; }
@@ -161,6 +161,18 @@ input[type="checkbox"] { accent-color: var(--accent); }
 .grid-head .sortable:hover { background: var(--hover); }
 .grid-head .sortmark { margin-left: 4px; font-size: 9px; color: var(--accent); }
 .grid-row .hit { background: var(--warn-soft); }
+
+/* ---------- foreign keys ---------- */
+.grid-head .fkref { display: inline-flex; align-items: center; gap: 3px; margin-left: 6px; color: var(--fg-3); }
+.c-fk { color: var(--t-num); }
+.grid-row .lk { opacity: 0; margin-left: 6px; width: 16px; height: 16px; border-radius: 4px; display: inline-grid; place-items: center; vertical-align: middle; color: var(--fg-3); }
+.grid-row:hover .lk { opacity: 1; }
+.grid-row .lk:hover { background: var(--hover); color: var(--accent); }
+.gridfoot .grow { flex: 1; }
+.gridfoot .linkbtn { display: inline-flex; align-items: center; gap: 4px; color: var(--accent); font-family: var(--font-mono); font-size: 11.5px; }
+.gridfoot .linkbtn:hover:not(:disabled) { text-decoration: underline; }
+.gridfoot .linkbtn:disabled { color: var(--fg-3); }
+.pin-badge.filtered { gap: 3px; color: var(--accent); background: var(--accent-soft); }
 
 /* ---------- grid ---------- */
 .grid-wrap { flex: 1; min-height: 0; overflow: auto; position: relative; font-family: var(--font-mono); font-size: 12.5px; font-variant-ligatures: none; }

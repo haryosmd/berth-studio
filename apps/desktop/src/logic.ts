@@ -1,5 +1,5 @@
 // Pure helpers for the interface. No DOM and no IPC, so tests/ can run them with node --test.
-import type { Column, Connection, Endpoint, Engine, EnvId, Environment, Filter, FilterOp, Json, Profile, Role, RowCount, Sort, Table } from './types';
+import type { Column, Connection, Endpoint, Engine, EnvId, Environment, Filter, FilterOp, ForeignKey, Json, Profile, Role, RowCount, Sort, Table } from './types';
 
 /** The environments a new workspace starts with; the Rust side owns the real list. */
 export const DEFAULT_ENVIRONMENTS: Environment[] = [
@@ -121,6 +121,42 @@ export function rowCountText(offset: number, shown: number, count: RowCount | nu
   const range = `Rows ${(offset + 1).toLocaleString('en-US')}–${(offset + shown).toLocaleString('en-US')}`;
   if (!count || count.total === null) return range;
   return count.exact ? `${range} of ${count.total.toLocaleString('en-US')}` : `${range} of ~${compact(count.total)}`;
+}
+
+/** Marks each column that is part of a foreign key with the column it points at. */
+export function attachForeignKeys(columns: Column[], fks: ForeignKey[]): Column[] {
+  return columns.map(c => {
+    for (const fk of fks) {
+      const i = fk.columns.indexOf(c.name);
+      if (i >= 0) return { ...c, fk: { schema: fk.refSchema, table: fk.refTable, column: fk.refColumns[i] } };
+    }
+    return c;
+  });
+}
+
+/** `→ orgs.id`; the schema shows only when it is not `public`. */
+export function fkLabel(fk: { schema: string; table: string; column: string }): string {
+  return `→ ${tableLabel(fk.schema, fk.table)}.${fk.column}`;
+}
+
+export function tableLabel(schema: string, table: string): string {
+  return schema === 'public' ? table : `${schema}.${table}`;
+}
+
+/**
+ * The chips that open the other side of a foreign key for one row: the row it points at
+ * (`out`), or the rows that point at it (`in`). Null when a key value is NULL, which no row matches.
+ */
+export function fkFilters(fk: ForeignKey, row: (string | null)[], columns: Column[], direction: 'out' | 'in'): Filter[] | null {
+  const from = direction === 'out' ? fk.columns : fk.refColumns;
+  const to = direction === 'out' ? fk.refColumns : fk.columns;
+  const out: Filter[] = [];
+  for (let i = 0; i < from.length; i++) {
+    const v = row[columns.findIndex(c => c.name === from[i])];
+    if (v === null || v === undefined) return null;
+    out.push({ column: to[i], op: 'eq', value: v });
+  }
+  return out;
 }
 
 /** Clicking a header cycles none → ascending → descending → none for that column. */

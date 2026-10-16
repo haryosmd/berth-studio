@@ -9,7 +9,7 @@ mod workspace;
 use app::{App, DocumentWrite, EndpointCheck, MongoOverview, Page, PasswordInput, RunResult, WriteOutcome};
 use berth_core::{Connection, Engine, EnvId, Environment, Profile, RouteMode};
 use berth_mongo::{CollectionInfo, Documents, FindRequest};
-use berth_postgres::{BrowseRequest, DbError, RowCount, Table};
+use berth_postgres::{BrowseRequest, DbError, RowCount, Table, TableInfo};
 use tauri::ipc::Channel;
 use tauri::{AppHandle, Manager, State};
 use update::{Pending, Progress, UpdateInfo};
@@ -66,6 +66,11 @@ async fn browse_table(
     request: BrowseRequest,
 ) -> Result<Page, DbError> {
     app.browse_table(&id, &env, &schema, &table, &request).await
+}
+
+#[tauri::command]
+async fn describe_table(app: State<'_, App>, id: String, env: EnvId, schema: String, table: String) -> Result<TableInfo, DbError> {
+    app.describe_table(&id, &env, &schema, &table).await
 }
 
 #[tauri::command]
@@ -200,6 +205,7 @@ fn main() {
             list_tables,
             browse_table,
             count_rows,
+            describe_table,
             run_query,
             cancel_query,
             mongo_overview,
