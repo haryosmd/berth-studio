@@ -125,6 +125,21 @@ fn rustls_connector(ca_cert: Option<&str>) -> Result<tokio_postgres_rustls::Make
     Ok(tokio_postgres_rustls::MakeRustlsConnect::new(config))
 }
 
+/// A handshake that fails with `UnknownIssuer` while no CA file is set is almost always a managed
+/// database signed by a CA no operating system ships, such as Amazon RDS. Bare "UnknownIssuer"
+/// reads like a bug, so the message says what to do.
+fn explain_unknown_issuer(mut err: DbError, ca_cert: Option<&str>) -> DbError {
+    let has_ca = ca_cert.map(str::trim).is_some_and(|p| !p.is_empty());
+    if !has_ca && err.message.contains("UnknownIssuer") {
+        err.message.push_str(
+            ". The system trust store does not know the CA that signed this server's certificate; \
+             set its PEM file as the CA certificate. Amazon RDS publishes one per region at \
+             https://truststore.pki.rds.amazonaws.com/",
+        );
+    }
+    err
+}
+
 /// Every certificate in the PEM file at `path`. A leading `~` means the home directory.
 fn extra_roots(path: &str) -> Result<Vec<rustls::pki_types::CertificateDer<'static>>, DbError> {
     use rustls::pki_types::{pem::PemObject, CertificateDer};
@@ -206,7 +221,8 @@ impl Session {
                 client
             }
             Tls::Rustls(m) => {
-                let (client, conn) = cfg.connect(m.clone()).await?;
+                let (client, conn) =
+                    cfg.connect(m.clone()).await.map_err(|err| explain_unknown_issuer(err.into(), e.ca_cert.as_deref()))?;
                 tokio::spawn(conn);
                 client
             }
@@ -405,6 +421,17 @@ mod tests {
         let e = rustls_connector(Some(missing.to_str().unwrap())).err().expect("an error");
         assert!(e.message.starts_with("CA certificate ") && e.message.contains("missing.pem"), "{}", e.message);
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn unknown_issuer_without_a_ca_file_says_what_to_do() {
+        let raw = "error performing TLS handshake: invalid peer certificate: UnknownIssuer";
+        let e = explain_unknown_issuer(DbError::msg(raw), None);
+        assert!(e.message.starts_with(raw) && e.message.contains("CA certificate"), "{}", e.message);
+        // With a CA file the file itself is the suspect, so the message stays as it was.
+        assert_eq!(explain_unknown_issuer(DbError::msg(raw), Some("~/ca.pem")).message, raw);
+        assert_eq!(explain_unknown_issuer(DbError::msg(raw), Some("  ")).message, e.message);
+        assert_eq!(explain_unknown_issuer(DbError::msg("connection refused"), None).message, "connection refused");
     }
 
     #[test]

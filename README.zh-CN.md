@@ -6,15 +6,15 @@
 </p>
 
 <p align="center">
-  <a href="README.md">English</a> ·
-  <a href="README.id.md">Bahasa Indonesia</a> ·
-  <b>简体中文</b> ·
-  <a href="README.ja.md">日本語</a> ·
-  <a href="README.ar.md">العربية</a> ·
-  <a href="README.ru.md">Русский</a>
+  🇬🇧 <a href="README.md">English</a> ·
+  🇮🇩 <a href="README.id.md">Bahasa Indonesia</a> ·
+  🇨🇳 <b>简体中文</b> ·
+  🇯🇵 <a href="README.ja.md">日本語</a> ·
+  🇸🇦 <a href="README.ar.md">العربية</a> ·
+  🇷🇺 <a href="README.ru.md">Русский</a>
 </p>
 
-> **提醒：** Berth Studio 还处在早期开发阶段。第一版桌面应用已经可以在 macOS 上从源码运行并连接 PostgreSQL，但还没有可下载的版本。可点击的原型展示了它的方向。
+> **提醒：** Berth Studio 还处在早期开发阶段。macOS 应用已经可以[下载](https://github.com/haryosmd/berth-studio/releases/latest)，并能连接 PostgreSQL 和 MongoDB。可点击的原型展示了它的方向。
 
 ## 为什么做 Berth Studio？
 
@@ -48,7 +48,13 @@ Berth Studio 把这些都放进一个窗口里，而且对生产环境格外谨�
 
 ## 上手试试
 
-### 运行应用（macOS）
+### 下载应用（macOS）
+
+从[发布页](https://github.com/haryosmd/berth-studio/releases/latest)获取最新的 `.dmg`。同一个构建同时支持 Apple 芯片和 Intel 的 Mac。打开 `.dmg`，把 Berth Studio 拖进“应用程序”。
+
+应用还没有用 Apple Developer ID 签名，所以 macOS 会拦住第一次启动。打开**系统设置 → 隐私与安全性**，往下滚动，选择**仍要打开**。之后的新版本通过应用内更新器送达，它只会安装签名校验通过的更新。
+
+### 从源码运行（macOS）
 
 需要 Rust（通过 `rustup` 安装）、Node.js 20 或更新版本，以及 Xcode Command Line Tools。第一次构建要几分钟。第二条命令会在 `127.0.0.1:54329` 启动一个带示例数据的临时 PostgreSQL（用户 `app`，密码 `berth-dev-app`；用 `scripts/dev-db/stop.sh` 删除）。如需 MongoDB，先用 Homebrew 安装 `mongodb-community@8.0`，再运行 `scripts/dev-db/mongo-start.sh`，会在 `127.0.0.1:54330` 启动一个临时副本集（用户 `app`，密码 `berth-dev-app`，认证数据库 `events`）。
 
@@ -57,6 +63,20 @@ npm ci
 scripts/dev-db/start.sh
 npm run tauri dev
 ```
+
+### 连接云端数据库
+
+Amazon RDS 和 Aurora、Azure Database、Google Cloud SQL、DigitalOcean 这类托管数据库，用的是服务商自己的 CA 来签发服务器证书，macOS 默认并不信任它。Berth Studio 照样会校验证书，所以在你提供服务商的 CA 之前，连接测试会报 `invalid peer certificate: UnknownIssuer`。
+
+1. 从服务商那里下载 CA 证书（一个 `.pem` 文件）。它通常在数据库的连接页面，叫“CA certificate”、“root certificate”或“SSL certificate”：
+   - **Amazon RDS 和 Aurora：** 每个区域一个 bundle，或者全局 bundle，见 [RDS 信任库](https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/UsingWithRDS.SSL.html)。
+   - **Azure Database for PostgreSQL：** [TLS 文档](https://learn.microsoft.com/azure/postgresql/flexible-server/concepts-networking-ssl-tls)里列出的根证书。
+   - **Google Cloud SQL：** 实例**连接**页面上的服务器 CA，见[文档](https://cloud.google.com/sql/docs/postgres/configure-ssl-instance)。
+   - **DigitalOcean：** 数据库**概览**页面上的 CA 证书，见[文档](https://docs.digitalocean.com/products/databases/postgresql/how-to/connect/)。
+2. 在 PostgreSQL 连接的表单里，把文件路径填进该环境配置的 **CA certificate** 字段。路径可以用 `~` 开头。
+3. 点击 **Test**。每次连接都会重新读取这个文件，所以别把它挪走。
+
+CA 文件只是追加到系统信任库，不会取代它。本机上的数据库或关闭了 TLS 的数据库不需要它。
 
 ### 打开原型
 

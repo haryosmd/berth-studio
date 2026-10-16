@@ -6,15 +6,15 @@
 </p>
 
 <p align="center">
-  <a href="README.md">English</a> ·
-  <a href="README.id.md">Bahasa Indonesia</a> ·
-  <a href="README.zh-CN.md">简体中文</a> ·
-  <a href="README.ja.md">日本語</a> ·
-  <a href="README.ar.md">العربية</a> ·
-  <b>Русский</b>
+  🇬🇧 <a href="README.md">English</a> ·
+  🇮🇩 <a href="README.id.md">Bahasa Indonesia</a> ·
+  🇨🇳 <a href="README.zh-CN.md">简体中文</a> ·
+  🇯🇵 <a href="README.ja.md">日本語</a> ·
+  🇸🇦 <a href="README.ar.md">العربية</a> ·
+  🇷🇺 <b>Русский</b>
 </p>
 
-> **Важно:** Berth Studio на ранней стадии разработки. Первую версию настольного приложения уже можно запустить из исходников на macOS и подключить к PostgreSQL, но скачать её пока нельзя. Кликабельный прототип показывает, куда движется проект.
+> **Важно:** Berth Studio на ранней стадии разработки. Приложение для macOS уже можно [скачать](https://github.com/haryosmd/berth-studio/releases/latest), оно работает с PostgreSQL и MongoDB. Кликабельный прототип показывает, куда движется проект.
 
 ## Зачем нужен Berth Studio?
 
@@ -48,7 +48,13 @@ Berth Studio собирает всё это в одном окне и при э�
 
 ## Попробовать
 
-### Запустить приложение (macOS)
+### Скачать приложение (macOS)
+
+Возьмите свежий `.dmg` на [странице релизов](https://github.com/haryosmd/berth-studio/releases/latest). Одна сборка работает и на Apple silicon, и на Intel. Откройте `.dmg` и перетащите Berth Studio в «Программы».
+
+Приложение пока не подписано Apple Developer ID, поэтому macOS блокирует первый запуск. Откройте **Системные настройки → Конфиденциальность и безопасность**, прокрутите вниз и нажмите **Всё равно открыть**. Следующие версии приходят через встроенный механизм обновлений, который ставит обновление, только если его подпись проходит проверку.
+
+### Запустить из исходников (macOS)
 
 Понадобятся Rust (через `rustup`), Node.js 20 или новее и Xcode Command Line Tools. Первая сборка занимает несколько минут. Вторая команда запускает временный PostgreSQL с демо-данными на `127.0.0.1:54329` (пользователь `app`, пароль `berth-dev-app`; `scripts/dev-db/stop.sh` удаляет его). Для MongoDB установите `mongodb-community@8.0` из Homebrew и запустите `scripts/dev-db/mongo-start.sh`: временный набор реплик на `127.0.0.1:54330` (пользователь `app`, пароль `berth-dev-app`, база аутентификации `events`).
 
@@ -57,6 +63,20 @@ npm ci
 scripts/dev-db/start.sh
 npm run tauri dev
 ```
+
+### Подключиться к базе в облаке
+
+Управляемые базы вроде Amazon RDS и Aurora, Azure Database, Google Cloud SQL или DigitalOcean подписывают серверные сертификаты собственным CA провайдера, которому macOS по умолчанию не доверяет. Berth Studio всё равно проверяет сертификат, поэтому тест подключения падает с `invalid peer certificate: UnknownIssuer`, пока вы не укажете CA провайдера.
+
+1. Скачайте сертификат CA (файл `.pem`) у провайдера. Обычно он лежит на странице подключения к базе и называется «CA certificate», «root certificate» или «SSL certificate»:
+   - **Amazon RDS и Aurora:** по одному бандлу на регион или глобальный бандл из [хранилища доверия RDS](https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/UsingWithRDS.SSL.html).
+   - **Azure Database for PostgreSQL:** корневые сертификаты из [документации по TLS](https://learn.microsoft.com/azure/postgresql/flexible-server/concepts-networking-ssl-tls).
+   - **Google Cloud SQL:** серверный CA на странице **Connections** инстанса, см. [документацию](https://cloud.google.com/sql/docs/postgres/configure-ssl-instance).
+   - **DigitalOcean:** сертификат CA на странице **Overview** базы, см. [документацию](https://docs.digitalocean.com/products/databases/postgresql/how-to/connect/).
+2. В форме подключения PostgreSQL укажите путь к файлу в поле **CA certificate** профиля нужного окружения. Путь может начинаться с `~`.
+3. Нажмите **Test**. Файл читается при каждом подключении, так что не переносите его.
+
+Файл CA дополняет системное хранилище доверия, а не заменяет его. Базам на вашей машине и базам с выключенным TLS он не нужен.
 
 ### Открыть прототип
 
