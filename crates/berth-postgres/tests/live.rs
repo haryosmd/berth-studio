@@ -1,6 +1,11 @@
 //! Runs against the throwaway database from `scripts/dev-db/start.sh`:
 //!     scripts/dev-db/start.sh && BERTH_TEST_PG=127.0.0.1:54329 cargo test -p berth-postgres
 //! Without BERTH_TEST_PG every test returns early, so `cargo test` works with no database.
+//!
+//! The TLS test instead needs a server signed by a CA the system does not trust, such as any
+//! Amazon RDS instance, plus its CA bundle. It never needs the password:
+//!     BERTH_TEST_TLS_HOST=db.xyz.ap-southeast-1.rds.amazonaws.com \
+//!     BERTH_TEST_TLS_CA=~/Downloads/ap-southeast-1-bundle.pem cargo test -p berth-postgres
 
 use berth_core::{Endpoint, Role, TlsMode};
 use berth_postgres::{Session, Target, MAX_ROWS};
@@ -99,4 +104,30 @@ async fn long_queries_time_out_and_can_be_cancelled() {
     tokio::time::sleep(Duration::from_millis(300)).await;
     c.cancel().await.unwrap();
     assert_eq!(run.await.unwrap().unwrap_err().code.as_deref(), Some("57014"));
+}
+
+/// The handshake must succeed with the CA file, so the only error left is the server refusing
+/// the made-up password. Without the CA file it must fail in TLS instead.
+#[tokio::test(flavor = "current_thread")]
+async fn tls_trusts_the_ca_file_besides_the_system_store() {
+    let (Ok(host), Ok(ca)) = (std::env::var("BERTH_TEST_TLS_HOST"), std::env::var("BERTH_TEST_TLS_CA")) else { return };
+    let ep = |ca_cert: Option<String>| Endpoint {
+        role: Role::Write,
+        host: host.clone(),
+        port: 5432,
+        database: "postgres".into(),
+        user: "berth_tls_probe".into(),
+        tls: TlsMode::Require,
+        ca_cert,
+        uri: None,
+        auth_source: None,
+        secret: None,
+        needs_secret: true,
+    };
+    let err = Session::connect(&Target::new(ep(Some(ca)), true), Some("not-the-password")).await.err().expect("an error");
+    assert!(err.code.is_some() || err.message.contains("password"), "expected a server-side refusal, got: {}", err.message);
+    assert!(!err.message.contains("TLS"), "{}", err.message);
+
+    let err = Session::connect(&Target::new(ep(None), true), Some("not-the-password")).await.err().expect("an error");
+    assert!(err.message.contains("UnknownIssuer") && err.message.contains("CA certificate"), "{}", err.message);
 }
