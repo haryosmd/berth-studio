@@ -3,7 +3,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   DEFAULT_ENVIRONMENTS, swapEnvToken, copyProfile, cellKind, display, roleIndex, lineCol, shortType, blankProfile, effectiveEnv,
-  hasWrite, nextEnvId, validEnvId, documentsToGrid, cellText, bsonType, idText, formatBytes,
+  hasWrite, nextEnvId, validEnvId, documentsToGrid, cellText, bsonType, idText, formatBytes, groupBySchema, matchesFilter, browseStatus,
 } from '../src/logic.ts';
 
 const [dev, staging, prod] = DEFAULT_ENVIRONMENTS;
@@ -93,6 +93,32 @@ test('passwords are matched by the index within a role', () => {
 
 test('lineCol turns a Postgres position into line and column', () => {
   assert.deepEqual(lineCol('SELECT 1,\n  nope FROM t', 13), { line: 2, col: 3 });
+});
+
+test('the sidebar groups tables by schema, public first', () => {
+  const t = (schema, name) => ({ schema, name, kind: 'table', estimatedRows: 1 });
+  const groups = groupBySchema([t('audit', 'log'), t('public', 'users'), t('public', 'orders'), t('billing', 'invoices')]);
+  assert.deepEqual(groups.map(g => g.schema), ['public', 'audit', 'billing']);
+  assert.deepEqual(groups[0].tables.map(x => x.name), ['users', 'orders'], 'catalog order is kept inside a schema');
+  assert.deepEqual(groupBySchema([]), []);
+});
+
+test('the sidebar filter is a case-insensitive substring of any label', () => {
+  assert.ok(matchesFilter('', 'anything'));
+  assert.ok(matchesFilter('  ', 'anything'), 'blank is empty');
+  assert.ok(matchesFilter('ORD', 'orders'));
+  assert.ok(matchesFilter('acme', 'users', 'acme-db'));
+  assert.ok(!matchesFilter('zzz', 'users', 'orders'));
+});
+
+test('the status bar explains whether a table can be edited', () => {
+  const write = blankProfile(dev);
+  assert.equal(browseStatus(write, true, true), 'production is read-only');
+  assert.equal(browseStatus(undefined, false, true), 'read-only profile');
+  assert.equal(browseStatus({ ...write, readOnly: true }, false, true), 'read-only profile');
+  assert.equal(browseStatus({ endpoints: [{ role: 'read' }], readOnly: false, autoRoute: true }, false, true), 'read-only profile');
+  assert.equal(browseStatus(write, false, true), 'editable · changes are reviewed before commit');
+  assert.equal(browseStatus(write, false, false), 'read-write profile');
 });
 
 test('formatBytes shows kilobytes below a megabyte and one decimal above', () => {

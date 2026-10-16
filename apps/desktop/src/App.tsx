@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { api } from './api';
 import { CollectionView } from './CollectionView';
 import { ConnectionSheet } from './ConnectionSheet';
@@ -8,10 +8,11 @@ import { QueryView } from './QueryView';
 import { TableView } from './TableView';
 import { Spinner, TreeNote } from './Status';
 import { UpdateButton } from './UpdateButton';
-import { DEFAULT_ENVIRONMENTS, effectiveEnv, findEnv, hasRead, hasWrite } from './logic';
+import { DEFAULT_ENVIRONMENTS, browseStatus, effectiveEnv, findEnv, groupBySchema, hasRead, hasWrite, matchesFilter } from './logic';
 import type { CollectionInfo, Connection, DbError, EnvId, Environment, MongoOverview, Role, Table } from './types';
 
-export interface Status { role: Role; host: string; detail: string; readOnly: boolean }
+/** What the footer shows for the active tab. `browse` marks a table tab, whose session is read-only whatever the profile allows. */
+export interface Status { role: Role; host: string; detail: string; readOnly: boolean; browse?: boolean }
 
 /** Every tab follows the workspace environment unless `pin` holds its own. */
 type Tab = { key: string; conn: string; pin?: EnvId } & (
@@ -49,6 +50,9 @@ export function App() {
   const [status, setStatus] = useState<Status | null>(null);
   const [theme, setTheme] = useState<Theme>(() => (pref.get('theme') as Theme) || 'system');
   const [loadError, setLoadError] = useState<string | null>(null);
+  const [filter, setFilter] = useState('');
+  const filterRef = useRef<HTMLInputElement>(null);
+  const filtering = filter.trim().length > 0;
   // Until the workspace is read, show a loading row instead of an empty workspace or default environments.
   const [ready, setReady] = useState(false);
 
@@ -63,6 +67,18 @@ export function App() {
       .catch((e: DbError) => setLoadError(e.message ?? String(e)))
       .finally(() => setReady(true));
     // Loaded once at start; later changes come back from the sheets.
+  }, []);
+  // ⌘P (Ctrl+P elsewhere) jumps to the sidebar filter; without preventDefault the webview would print.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && !e.shiftKey && !e.altKey && e.key.toLowerCase() === 'p') {
+        e.preventDefault();
+        filterRef.current?.focus();
+        filterRef.current?.select();
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
   }, []);
   useEffect(() => {
     const root = document.documentElement;
@@ -190,6 +206,14 @@ export function App() {
             Connections
             <button className="iconbtn" aria-label="New connection" title="New connection" onClick={() => setSheet({ conn: null, env })}><Icon name="plus" /></button>
           </div>
+          <div className="side-tools">
+            <label className="side-filter">
+              <Icon name="search" size={12} />
+              <input ref={filterRef} value={filter} placeholder="Filter" aria-label="Filter the sidebar" spellCheck={false}
+                onChange={e => setFilter(e.target.value)} onKeyDown={e => { if (e.key === 'Escape') { setFilter(''); e.currentTarget.blur(); } }} />
+              <kbd>⌘P</kbd>
+            </label>
+          </div>
           <div className="side-scroll" role="tree">
             {loadError && <div className="msg error">{loadError}</div>}
             {!ready && <TreeNote loading>Loading workspace…</TreeNote>}
@@ -198,74 +222,117 @@ export function App() {
               const k = `${c.id}|${env}`;
               const list = tables[k];
               const overview = overviews[k];
+              const groups = Array.isArray(list) ? groupBySchema(list) : [];
+              const dbs = overview && overview !== 'loading' && !isError(overview) ? overview.databases : [];
+              const collNames = (db: string) => { const cl = collections[`${k}|${db}`]; return Array.isArray(cl) ? cl.map(x => x.name) : []; };
+              // With a filter, a connection shows when it or anything loaded inside it matches, and it opens by itself.
+              const inside = [...groups.flatMap(g => [g.schema, ...g.tables.map(t => t.name)]), ...dbs, ...dbs.flatMap(collNames)];
+              if (filtering && !matchesFilter(filter, c.id, ...inside)) return null;
+              const isOpen = !!p && (!!open[c.id] || filtering);
               return (
-                <div key={c.id} role="treeitem" aria-expanded={!!open[c.id]}>
-                  <button className={`node${p ? '' : ' missing'}`} onClick={() => (p ? setOpen({ ...open, [c.id]: !open[c.id] }) : setSheet({ conn: c, env }))}
-                    title={p ? undefined : `${c.id} has no ${workspaceEnv.label} profile. Click to set it up.`}>
-                    <Icon name={p && open[c.id] ? 'chevd' : 'chev'} size={12} />
-                    <Icon name={c.engine === 'mongodb' ? 'leaf' : 'db'} />
-                    <span className="lbl">{c.id}</span>
-                    {p ? <span className="dots" aria-label="Environments">{envs.map(e => <Dot key={e.id} env={e} off={!c.profiles[e.id]} />)}</span>
-                      : <span className="meta">not in {workspaceEnv.label}</span>}
-                  </button>
-                  {p && open[c.id] && (
-                    <div role="group">
-                      {c.engine === 'postgres' && <button className="node child" onClick={() => newQuery(c.id)}><Icon name="code" /><span className="lbl">New query</span></button>}
-                      <button className="node child" onClick={() => setSheet({ conn: c, env })}><Icon name="gear" /><span className="lbl">Edit profiles</span></button>
-                      {c.engine === 'postgres' && list === 'loading' && <TreeNote depth="child" loading>Loading tables…</TreeNote>}
-                      {c.engine === 'postgres' && Array.isArray(list) && !list.length && <TreeNote depth="child">No tables or views you can read</TreeNote>}
-                      {c.engine === 'postgres' && (Array.isArray(list)
-                        ? list.map(t => {
-                            const key = `t|${c.id}|${t.schema}.${t.name}`;
-                            return (
-                              <button key={key} className={`node child${active === key ? ' active' : ''}`} onClick={() => openTab({ key, kind: 'table', conn: c.id, schema: t.schema, table: t.name })}>
-                                <Icon name={t.kind === 'table' ? 'table' : 'view'} />
-                                <span className="lbl">{t.schema === 'public' ? t.name : `${t.schema}.${t.name}`}</span>
-                                <span className="meta">{t.estimatedRows >= 0 ? compact(t.estimatedRows) : ''}</span>
-                              </button>
-                            );
-                          })
-                        : isError(list) && <TreeNote depth="child" error={list.message}>{list.message}</TreeNote>)}
+                <div key={c.id} role="treeitem" aria-expanded={isOpen}>
+                  <div className={`node conn${p ? '' : ' missing'}${isOpen ? ' open' : ''}`}>
+                    <button className="node-btn" onClick={() => (p ? setOpen({ ...open, [c.id]: !open[c.id] }) : setSheet({ conn: c, env }))}
+                      title={p ? undefined : `${c.id} has no ${workspaceEnv.label} profile. Click to set it up.`}>
+                      <span className="tw"><Icon name="chev" size={12} /></span>
+                      <Icon name={c.engine === 'mongodb' ? 'leaf' : 'db'} />
+                      <span className="lbl">{c.id}</span>
+                      {p ? <span className="dots" aria-label="Environments">{envs.map(e => <Dot key={e.id} env={e} off={!c.profiles[e.id]} />)}</span>
+                        : <span className="meta">not in {workspaceEnv.label}</span>}
+                    </button>
+                    <span className="acts">
+                      {c.engine === 'postgres' && p && (
+                        <button className="iconbtn" aria-label={`New query on ${c.id}`} title="New query" onClick={() => newQuery(c.id)}><Icon name="code" size={14} /></button>
+                      )}
+                      <button className="iconbtn" aria-label={`Edit the profiles of ${c.id}`} title="Edit profiles" onClick={() => setSheet({ conn: c, env })}><Icon name="gear" size={14} /></button>
+                    </span>
+                  </div>
+                  {isOpen && (
+                    <div role="group" className="tree-inner">
+                      {c.engine === 'postgres' && list === 'loading' && <TreeNote depth="lvl1" loading>Loading tables…</TreeNote>}
+                      {c.engine === 'postgres' && Array.isArray(list) && !list.length && <TreeNote depth="lvl1">No tables or views you can read</TreeNote>}
+                      {c.engine === 'postgres' && isError(list) && <TreeNote depth="lvl1" error={list.message}>{list.message}</TreeNote>}
+                      {c.engine === 'postgres' && groups.map(g => {
+                        const sk = `${k}|${g.schema}`;
+                        const shown = filtering && !matchesFilter(filter, g.schema) ? g.tables.filter(t => matchesFilter(filter, t.name)) : g.tables;
+                        if (filtering && !shown.length) return null;
+                        const schemaOpen = open[sk] !== false || filtering;
+                        return (
+                          <div key={sk} role="treeitem" aria-expanded={schemaOpen}>
+                            <button className={`node lvl1${schemaOpen ? ' open' : ''}`} onClick={() => setOpen({ ...open, [sk]: !schemaOpen })}>
+                              <span className="tw"><Icon name="chev" size={12} /></span>
+                              <Icon name="schema" />
+                              <span className="lbl">{g.schema}</span>
+                              <span className="meta">{g.tables.length}</span>
+                            </button>
+                            {schemaOpen && (
+                              <div role="group" className="tree-inner">
+                                {shown.map(t => {
+                                  const key = `t|${c.id}|${t.schema}.${t.name}`;
+                                  return (
+                                    <button key={key} className={`node lvl2${active === key ? ' active' : ''}`} onClick={() => openTab({ key, kind: 'table', conn: c.id, schema: t.schema, table: t.name })}>
+                                      <Icon name={t.kind === 'table' ? 'table' : 'view'} />
+                                      <span className="lbl">{t.name}</span>
+                                      <span className="meta">{t.estimatedRows >= 0 ? compact(t.estimatedRows) : ''}</span>
+                                    </button>
+                                  );
+                                })}
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })}
+                      {c.engine === 'mongodb' && overview === 'loading' && <TreeNote depth="lvl1" loading>Connecting…</TreeNote>}
+                      {c.engine === 'mongodb' && isError(overview) && <TreeNote depth="lvl1" error={overview.message}>{overview.message}</TreeNote>}
                       {c.engine === 'mongodb' && overview && overview !== 'loading' && !isError(overview) && (
-                        <div className="node child missing"><Icon name="leaf" /><span className="lbl">MongoDB {overview.server.version} · {overview.server.topology}</span></div>
-                      )}
-                      {c.engine === 'mongodb' && overview === 'loading' && <TreeNote depth="child" loading>Connecting…</TreeNote>}
-                      {c.engine === 'mongodb' && overview && overview !== 'loading' && !isError(overview) && !overview.databases.length && (
-                        <TreeNote depth="child">No databases you can read</TreeNote>
-                      )}
-                      {c.engine === 'mongodb' && (isError(overview)
-                        ? <TreeNote depth="child" error={overview.message}>{overview.message}</TreeNote>
-                        : overview && overview !== 'loading' && overview.databases.map(db => {
-                            const dk = `${c.id}|${env}|${db}`;
+                        <>
+                          {!filtering && <div className="node lvl1 missing"><Icon name="leaf" /><span className="lbl">MongoDB {overview.server.version} · {overview.server.topology}</span></div>}
+                          {!overview.databases.length && <TreeNote depth="lvl1">No databases you can read</TreeNote>}
+                          {overview.databases.map(db => {
+                            const dk = `${k}|${db}`;
                             const colls = collections[dk];
+                            const dbMatches = matchesFilter(filter, db);
+                            if (filtering && !dbMatches && !collNames(db).some(n => matchesFilter(filter, n))) return null;
+                            const dbOpen = !!open[dk] || (filtering && !dbMatches);
                             return (
-                              <div key={db} role="treeitem" aria-expanded={!!open[dk]}>
-                                <button className="node child" onClick={() => toggleDb(c, db)}>
-                                  <Icon name={open[dk] ? 'chevd' : 'chev'} size={12} /><Icon name="db" /><span className="lbl">{db}</span>
+                              <div key={db} role="treeitem" aria-expanded={dbOpen}>
+                                <button className={`node lvl1${dbOpen ? ' open' : ''}`} onClick={() => toggleDb(c, db)}>
+                                  <span className="tw"><Icon name="chev" size={12} /></span><Icon name="db" /><span className="lbl">{db}</span>
                                 </button>
-                                {open[dk] && colls === 'loading' && <TreeNote depth="grandchild" loading>Loading collections…</TreeNote>}
-                                {open[dk] && Array.isArray(colls) && !colls.length && <TreeNote depth="grandchild">No collections</TreeNote>}
-                                {open[dk] && (Array.isArray(colls)
-                                  ? colls.map(col => {
+                                {dbOpen && (
+                                  <div role="group" className="tree-inner">
+                                    {colls === 'loading' && <TreeNote depth="lvl2" loading>Loading collections…</TreeNote>}
+                                    {Array.isArray(colls) && !colls.length && <TreeNote depth="lvl2">No collections</TreeNote>}
+                                    {isError(colls) && <TreeNote depth="lvl2" error={colls.message}>{colls.message}</TreeNote>}
+                                    {Array.isArray(colls) && colls.filter(col => !filtering || dbMatches || matchesFilter(filter, col.name)).map(col => {
                                       const key = `m|${c.id}|${db}.${col.name}`;
                                       return (
-                                        <button key={key} className={`node grandchild${active === key ? ' active' : ''}`}
+                                        <button key={key} className={`node lvl2${active === key ? ' active' : ''}`}
                                           onClick={() => openTab({ key, kind: 'collection', conn: c.id, db, collection: col.name })}>
                                           <Icon name={col.kind === 'view' ? 'view' : 'table'} />
                                           <span className="lbl">{col.name}</span>
                                           <span className="meta">{col.kind === 'view' ? 'view' : col.count !== undefined ? compact(col.count) : ''}</span>
                                         </button>
                                       );
-                                    })
-                                  : isError(colls) && <TreeNote depth="grandchild" error={colls.message}>{colls.message}</TreeNote>)}
+                                    })}
+                                  </div>
+                                )}
                               </div>
                             );
-                          }))}
+                          })}
+                        </>
+                      )}
                     </div>
                   )}
                 </div>
               );
             })}
+            {filtering && ready && conns.length > 0 && !conns.some(c => {
+              const k = `${c.id}|${env}`;
+              const list = tables[k];
+              const names = Array.isArray(list) ? list.flatMap(t => [t.schema, t.name]) : [];
+              return matchesFilter(filter, c.id, ...names);
+            }) && <TreeNote>Nothing matches “{filter.trim()}”</TreeNote>}
             {ready && !conns.length && !loadError && (
               <div className="empty">
                 <h3>No connections yet</h3>
@@ -309,7 +376,7 @@ export function App() {
               </div>
             </div>
           ) : tab.kind === 'table' ? (
-            <TableView key={`${tab.key}|${tabEnvId}`} conn={tab.conn} env={tabEnvId} schema={tab.schema} table={tab.table} envControl={envControl} onStatus={onStatus} />
+            <TableView key={`${tab.key}|${tabEnvId}`} conn={tab.conn} env={tabEnvId} envLabel={tabEnv.label} schema={tab.schema} table={tab.table} envControl={envControl} onStatus={onStatus} />
           ) : tab.kind === 'collection' ? (
             <CollectionView key={`${tab.key}|${tabEnvId}`} conn={tab.conn} env={tabEnvId} envLabel={tabEnv.label} db={tab.db} collection={tab.collection}
               readOnly={profile.readOnly || tabEnv.production} canWrite={!profile.readOnly || tabEnv.production} envControl={envControl} onStatus={onStatus} />
@@ -324,9 +391,14 @@ export function App() {
       <footer className="status">
         <span className="prodtag">PRODUCTION</span>
         <span><Dot env={tabEnv} /> {tab ? `${tab.conn} · ${tabEnv.label}${tab.pin ? ' (pinned)' : ''}` : workspaceEnv.label}</span>
-        {status && tab && <><span>{status.role} · <span className="mono">{status.host}</span></span><span>{status.detail}</span></>}
+        {status && tab && <><span>{status.browse ? 'browse' : status.role} · <span className="mono">{status.host}</span></span><span>{status.detail}</span></>}
         <span className="grow" />
-        {status && tab && <span>{status.readOnly ? 'read-only session' : production ? 'wrote once; the next query is read-only again' : 'read-write session'}</span>}
+        {status && tab && (
+          <span>
+            {status.browse ? browseStatus(profile, production, false)
+              : status.readOnly ? 'read-only session' : production ? 'wrote once; the next query is read-only again' : 'read-write session'}
+          </span>
+        )}
         <span className="faint">{production ? 'Production opens read-only' : tabConn?.engine === 'mongodb' ? 'MongoDB' : 'PostgreSQL'}</span>
       </footer>
 
