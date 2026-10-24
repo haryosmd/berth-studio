@@ -1,5 +1,7 @@
 // Pure helpers for the interface. No DOM and no IPC, so tests/ can run them with node --test.
-import type { Column, Connection, Endpoint, Engine, EnvId, Environment, Filter, FilterOp, ForeignKey, Json, Profile, Role, RowCount, Sort, Table } from './types';
+import type {
+  Column, Connection, EditPlan, Endpoint, Engine, EnvId, Environment, Filter, FilterOp, ForeignKey, Json, Profile, Role, RowCount, Sort, Table,
+} from './types';
 
 /** The environments a new workspace starts with; the Rust side owns the real list. */
 export const DEFAULT_ENVIRONMENTS: Environment[] = [
@@ -66,9 +68,50 @@ export function matchesFilter(needle: string, ...labels: string[]): boolean {
 
 /** What the status bar says about a table tab: whether rows can be changed, and why not. */
 export function browseStatus(p: Profile | undefined, production: boolean, canEdit: boolean): string {
-  if (production) return 'production is read-only';
-  if (!p || !hasWrite(p) || p.readOnly) return 'read-only profile';
+  if (!p || !hasWrite(p)) return 'read-only profile';
+  if (production) return canEdit ? 'production · an edit asks for the connection name' : 'production is read-only';
+  if (p.readOnly) return 'read-only profile';
   return canEdit ? 'editable · changes are reviewed before commit' : 'read-write profile';
+}
+
+/** The primary-key values of a row, as the key edits are grouped by. */
+export function rowKey(row: (string | null)[], columns: Column[]): string {
+  return JSON.stringify(columns.flatMap((c, i) => (c.primaryKey ? [row[i]] : [])));
+}
+
+export function editKey(key: string, column: string): string {
+  return JSON.stringify([key, column]);
+}
+
+/** What a typed cell means: empty or `NULL` is SQL NULL. */
+export function parseCellInput(text: string): string | null {
+  return text === '' || text === 'NULL' ? null : text;
+}
+
+/** Groups pending edits by row; the key holds the values the row had when it was read. */
+export function editsToPlan(edits: Record<string, string | null>, rows: (string | null)[][], columns: Column[]): EditPlan {
+  const byKey = new Map<string, (string | null)[]>();
+  for (const r of rows) byKey.set(rowKey(r, columns), r);
+  const plan = new Map<string, EditPlan['rows'][number]>();
+  for (const [k, value] of Object.entries(edits)) {
+    const [key, column] = JSON.parse(k) as [string, string];
+    const row = byKey.get(key);
+    if (!row) continue;
+    let entry = plan.get(key);
+    if (!entry) {
+      entry = { key: columns.flatMap((c, i) => (c.primaryKey ? [{ column: c.name, value: row[i] }] : [])), set: [] };
+      plan.set(key, entry);
+    }
+    entry.set.push({ column, value });
+  }
+  return { rows: [...plan.values()] };
+}
+
+/** Whether a grid can be edited, and the reason when it cannot. */
+export function canEditTable(columns: Column[], kind?: string): { ok: boolean; reason?: string } {
+  if (kind && kind !== 'table' && kind !== 'partitioned table') return { ok: false, reason: `A ${kind} cannot be edited inline` };
+  if (!columns.some(c => c.primaryKey)) return { ok: false, reason: 'No primary key, so rows cannot be edited inline' };
+  return { ok: true };
 }
 
 /** The filter operators, in menu order. */

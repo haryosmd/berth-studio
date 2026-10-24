@@ -9,7 +9,7 @@
 //! An RDS host must also get past TLS with no bundle at all, since its roots ship in the crate.
 
 use berth_core::{Endpoint, Role, TlsMode};
-use berth_postgres::{BrowseRequest, Filter, FilterOp, Session, Sort, Target, MAX_ROWS};
+use berth_postgres::{build_updates, BrowseRequest, CellEdit, EditPlan, Filter, FilterOp, RowEdit, Session, Sort, Target, MAX_ROWS};
 use std::time::Duration;
 
 fn target(user: &str, read_only: bool) -> Option<Target> {
@@ -135,6 +135,55 @@ async fn foreign_keys_are_read_in_both_directions() {
     assert!(orgs.foreign_keys.is_empty());
     assert!(orgs.referenced_by.iter().any(|f| f.table == "users" && f.columns == ["org_id"]));
     assert!(s.describe("public", "nope").await.is_err());
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn edits_commit_in_one_transaction_or_not_at_all() {
+    let Some(w) = app(false).await else { return };
+    let cell = |column: &str, value: Option<&str>| CellEdit { column: column.into(), value: value.map(str::to_string) };
+    let plan = |rows: Vec<(&str, Option<&str>)>| EditPlan {
+        rows: rows
+            .into_iter()
+            .map(|(id, v)| RowEdit {
+                key: vec![cell("id", Some(id))],
+                set: vec![cell("plan", v), cell("metadata", Some("{\"via\": \"grid\"}"))],
+            })
+            .collect(),
+    };
+    let columns = w.columns("public", "users").await.unwrap();
+    async fn read(s: &Session, id: &str) -> Vec<Option<String>> {
+        s.run(&format!("SELECT plan, metadata::text FROM users WHERE id = {id}")).await.unwrap()[0].rows[0].clone()
+    }
+    let before = read(&w, "1").await;
+
+    let st = build_updates("public", "users", &columns, &plan(vec![("1", Some("team"))])).unwrap();
+    assert_eq!(w.apply_edits(&st).await.unwrap(), 1);
+    assert_eq!(read(&w, "1").await, vec![Some("team".to_string()), Some("{\"via\": \"grid\"}".to_string())]);
+
+    // The second row does not exist, so the first change is rolled back with it.
+    let st = build_updates("public", "users", &columns, &plan(vec![("2", Some("team")), ("9999999", Some("team"))])).unwrap();
+    let err = w.apply_edits(&st).await.unwrap_err();
+    assert!(err.message.contains("matched 0 rows"), "{err:?}");
+    assert_ne!(read(&w, "2").await[1], Some("{\"via\": \"grid\"}".to_string()));
+    // A value the column refuses rolls back too, and the session is usable afterwards.
+    let st = build_updates("public", "users", &columns, &plan(vec![("3", None)])).unwrap();
+    assert_eq!(w.apply_edits(&st).await.unwrap_err().code.as_deref(), Some("23502"), "plan is NOT NULL");
+    assert!(read(&w, "3").await[1].is_some());
+
+    // Put row 1 back the way it was.
+    let restore = EditPlan {
+        rows: vec![RowEdit {
+            key: vec![cell("id", Some("1"))],
+            set: vec![cell("plan", before[0].as_deref()), cell("metadata", before[1].as_deref())],
+        }],
+    };
+    w.apply_edits(&build_updates("public", "users", &columns, &restore).unwrap()).await.unwrap();
+    assert_eq!(read(&w, "1").await, before);
+
+    // A read-only session refuses the whole thing at the server.
+    let ro = app(true).await.unwrap();
+    let st = build_updates("public", "users", &columns, &plan(vec![("1", Some("team"))])).unwrap();
+    assert_eq!(ro.apply_edits(&st).await.unwrap_err().code.as_deref(), Some("25006"));
 }
 
 #[tokio::test(flavor = "current_thread")]

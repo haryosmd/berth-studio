@@ -128,6 +128,15 @@ export interface BrowseRequest {
   offset: number;
 }
 
+/** One cell of an edit; `null` is SQL NULL. */
+export interface CellEdit { column: string; value: string | null }
+/** One row's edits: `key` is every primary-key column with the value the row had when it was read. */
+export interface RowEdit { key: CellEdit[]; set: CellEdit[] }
+export interface EditPlan { rows: RowEdit[] }
+export interface Statement { sql: string; params: (string | null)[] }
+export interface EditPreview { statements: Statement[]; text: string }
+export interface EditOutcome { rows: number; host: string; elapsedMs: number }
+
 /** Exact when the request filters, otherwise the planner's estimate (`null` for views and unanalysed tables). */
 export interface RowCount {
   total: number | null;

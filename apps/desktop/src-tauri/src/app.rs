@@ -14,7 +14,10 @@ use berth_core::{
     Kind, Profile, Role, RouteMode, RouteOptions,
 };
 use berth_mongo::{CollectionInfo, Documents, FindRequest, MongoError, ServerInfo};
-use berth_postgres::{BrowseRequest, Canceller, DbError, ResultSet, RowCount, Session, Table, TableInfo, Target};
+use berth_postgres::{
+    build_updates, preview_text, BrowseRequest, Canceller, DbError, EditPlan, EditPreview, ResultSet, RowCount, Session, Table, TableInfo,
+    Target,
+};
 use berth_secrets::{account, account_of, reference, SecretStore};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -32,6 +35,15 @@ pub struct PasswordInput {
     /// Position among the profile's endpoints with the same role.
     pub index: usize,
     pub password: String,
+}
+
+/// What a commit from the grid changed.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EditOutcome {
+    pub rows: u64,
+    pub host: String,
+    pub elapsed_ms: u64,
 }
 
 #[derive(Debug, Serialize)]
@@ -419,6 +431,52 @@ impl App {
         self.reader(id, env).await?.0.describe(schema, table).await
     }
 
+    /// Decides whether a write from the grid may run, and opens a session of its own on the
+    /// primary for it: never cached, so a transaction can never be left open on a session the
+    /// browser shares, and the next production write asks for the name again.
+    async fn pg_writer(&self, id: &str, env: &EnvId, confirm: Option<&str>) -> Result<(Session, String), DbError> {
+        let (_, p, environment) = self.profile(id, env, Engine::Postgres).await?;
+        let e = p
+            .endpoints(Role::Write)
+            .next()
+            .ok_or_else(|| coded(NO_WRITE, format!("The {env} profile of {id} has no write endpoint, so it can only read.")))?;
+        if environment.production {
+            check_prod_write(&environment, Kind::Write, id, confirm).map_err(|m| coded(CONFIRM_CODE, m))?;
+        } else if p.read_only {
+            return Err(coded(NO_WRITE, format!("The {env} profile of {id} opens read-only.")));
+        }
+        let pw = self.password_for(e)?;
+        let s = Session::connect(&Target::new(e.clone(), false), pw.as_ref().map(|x| x.as_str())).await?;
+        Ok((s, e.host.clone()))
+    }
+
+    /// The SQL a plan would run, for review. Needs no write access: it only reads the catalog.
+    pub async fn preview_edits(&self, id: &str, env: &EnvId, schema: &str, table: &str, plan: &EditPlan) -> Result<EditPreview, DbError> {
+        let (s, _) = self.reader(id, env).await?;
+        let columns = s.columns(schema, table).await?;
+        let statements = build_updates(schema, table, &columns, plan)?;
+        let text = preview_text(schema, table, &statements, plan);
+        Ok(EditPreview { statements, text })
+    }
+
+    pub async fn commit_edits(
+        &self,
+        id: &str,
+        env: &EnvId,
+        schema: &str,
+        table: &str,
+        plan: &EditPlan,
+        confirm: Option<&str>,
+    ) -> Result<EditOutcome, DbError> {
+        let (s, host) = self.pg_writer(id, env, confirm).await?;
+        // The catalog is read again on the write session: columns may have changed since the page loaded.
+        let columns = s.columns(schema, table).await?;
+        let statements = build_updates(schema, table, &columns, plan)?;
+        let t = Instant::now();
+        let rows = s.apply_edits(&statements).await?;
+        Ok(EditOutcome { rows, host, elapsed_ms: t.elapsed().as_millis() as u64 })
+    }
+
     pub async fn count_rows(&self, id: &str, env: &EnvId, schema: &str, table: &str, request: &BrowseRequest) -> Result<RowCount, DbError> {
         self.reader(id, env).await?.0.count(schema, table, request).await
     }
@@ -619,7 +677,7 @@ fn mongo_target(e: &Endpoint, p: &Profile, read_only: bool) -> berth_mongo::Targ
 mod tests {
     use super::*;
     use berth_core::{default_environments, ReadPreference, TlsMode};
-    use berth_postgres::{Filter, FilterOp};
+    use berth_postgres::{CellEdit, Filter, FilterOp, RowEdit};
     use berth_secrets::MemoryStore;
     use std::collections::BTreeMap;
 
@@ -852,6 +910,37 @@ mod tests {
         assert!(n.exact && n.total.is_some_and(|t| t > 0), "{n:?}");
         let page = a.browse_table("acme-db", &dev, "public", "orders", &filtered).await.unwrap();
         assert!(page.set.rows.iter().all(|r| r[2].as_deref() == Some("paid")));
+
+        // Grid edits: dev commits on the primary; prod needs the typed name; a read-only profile is refused.
+        let cell = |column: &str, value: Option<&str>| CellEdit { column: column.into(), value: value.map(str::to_string) };
+        let plan = EditPlan { rows: vec![RowEdit { key: vec![cell("id", Some("5"))], set: vec![cell("plan", Some("team"))] }] };
+        let preview = a.preview_edits("acme-db", &dev, "public", "users", &plan).await.unwrap();
+        assert!(
+            preview.text.contains("UPDATE \"public\".\"users\" SET \"plan\" = ($1::text)::text WHERE \"id\" = ($2::text)::integer"),
+            "{}",
+            preview.text
+        );
+        let done = a.commit_edits("acme-db", &dev, "public", "users", &plan, None).await.unwrap();
+        assert_eq!(done.rows, 1);
+        let r = a.run_query("acme-db", &dev, "SELECT plan FROM users WHERE id = 5", RouteMode::Write, None, "r8").await.unwrap();
+        assert_eq!(r.results[0].rows[0][0].as_deref(), Some("team"));
+        assert_eq!(a.commit_edits("acme-db", &prod, "public", "users", &plan, None).await.unwrap_err().code.as_deref(), Some(CONFIRM_CODE));
+        assert!(a.commit_edits("acme-db", &prod, "public", "users", &plan, Some("acme")).await.is_err());
+        let restore = EditPlan { rows: vec![RowEdit { key: vec![cell("id", Some("5"))], set: vec![cell("plan", Some("starter"))] }] };
+        assert_eq!(a.commit_edits("acme-db", &prod, "public", "users", &restore, Some("acme-db")).await.unwrap().rows, 1);
+        // The cached browse session is still read-only after all that.
+        let e = a.run_query("acme-db", &dev, "UPDATE users SET plan = plan WHERE id = 5", RouteMode::Read, None, "r9").await.unwrap_err();
+        assert_eq!(e.code.as_deref(), Some("25006"));
+        let mut ro = conn();
+        ro.id = "ro-db".into();
+        ro.profiles.get_mut(&dev).unwrap().read_only = true;
+        a.save_connection(
+            ro,
+            passwords().into_iter().map(|p| PasswordInput { env: p.env, role: p.role, index: p.index, password: p.password }).collect(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(a.commit_edits("ro-db", &dev, "public", "users", &plan, None).await.unwrap_err().code.as_deref(), Some(NO_WRITE));
 
         let checks = a.test_profile("acme-db", Engine::Postgres, &dev, conn().profiles[&dev].clone(), vec![]).await.unwrap();
         assert!(checks.iter().all(|c| c.ok), "{checks:?}");

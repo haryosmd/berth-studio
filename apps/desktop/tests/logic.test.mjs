@@ -5,6 +5,7 @@ import {
   DEFAULT_ENVIRONMENTS, swapEnvToken, copyProfile, cellKind, display, roleIndex, lineCol, shortType, blankProfile, effectiveEnv,
   hasWrite, nextEnvId, validEnvId, documentsToGrid, cellText, bsonType, idText, formatBytes, groupBySchema, matchesFilter, browseStatus,
   filterText, parseInValues, findRows, rowCountText, nextSort, compact, attachForeignKeys, fkFilters, fkLabel, tableLabel,
+  rowKey, editKey, parseCellInput, editsToPlan, canEditTable,
 } from '../src/logic.ts';
 
 const [dev, staging, prod] = DEFAULT_ENVIRONMENTS;
@@ -115,7 +116,8 @@ test('the sidebar filter is a case-insensitive substring of any label', () => {
 
 test('the status bar explains whether a table can be edited', () => {
   const write = blankProfile(dev);
-  assert.equal(browseStatus(write, true, true), 'production is read-only');
+  assert.equal(browseStatus(write, true, true), 'production · an edit asks for the connection name');
+  assert.equal(browseStatus(write, true, false), 'production is read-only');
   assert.equal(browseStatus(undefined, false, true), 'read-only profile');
   assert.equal(browseStatus({ ...write, readOnly: true }, false, true), 'read-only profile');
   assert.equal(browseStatus({ endpoints: [{ role: 'read' }], readOnly: false, autoRoute: true }, false, true), 'read-only profile');
@@ -164,6 +166,31 @@ test('foreign keys annotate columns and turn a row into chips for the other side
   assert.equal(fkFilters(fk, ['7', null, 'eu'], columns, 'out'), null, 'a NULL key points nowhere');
   const orgColumns = [{ name: 'id', primaryKey: true }, { name: 'region', primaryKey: false }];
   assert.deepEqual(fkFilters(fk, ['5', 'eu'], orgColumns, 'in'), [{ column: 'org_id', op: 'eq', value: '5' }, { column: 'region', op: 'eq', value: 'eu' }]);
+});
+
+test('grid edits are grouped by primary key with the original key values', () => {
+  const columns = [{ name: 'org', primaryKey: true }, { name: 'id', primaryKey: true }, { name: 'plan', primaryKey: false }, { name: 'note', primaryKey: false }];
+  const rows = [['1', '10', 'pro', null], ['1', '11', 'team', 'x']];
+  assert.equal(rowKey(rows[0], columns), '["1","10"]');
+  const edits = {
+    [editKey(rowKey(rows[0], columns), 'plan')]: 'team',
+    [editKey(rowKey(rows[0], columns), 'note')]: 'hello',
+    [editKey(rowKey(rows[1], columns), 'note')]: null,
+    [editKey('["gone"]', 'plan')]: 'x',
+  };
+  assert.deepEqual(editsToPlan(edits, rows, columns), {
+    rows: [
+      { key: [{ column: 'org', value: '1' }, { column: 'id', value: '10' }], set: [{ column: 'plan', value: 'team' }, { column: 'note', value: 'hello' }] },
+      { key: [{ column: 'org', value: '1' }, { column: 'id', value: '11' }], set: [{ column: 'note', value: null }] },
+    ],
+  });
+  assert.equal(parseCellInput(''), null);
+  assert.equal(parseCellInput('NULL'), null);
+  assert.equal(parseCellInput('null'), 'null', 'only the SQL spelling means NULL');
+  assert.equal(parseCellInput(' 0 '), ' 0 ');
+  assert.deepEqual(canEditTable(columns, 'table'), { ok: true });
+  assert.equal(canEditTable(columns, 'view').ok, false);
+  assert.equal(canEditTable([{ name: 'a', primaryKey: false }], 'table').reason, 'No primary key, so rows cannot be edited inline');
 });
 
 test('a header click cycles the sort', () => {

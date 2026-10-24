@@ -494,6 +494,31 @@ impl Session {
         Ok(RowCount { total, exact: false })
     }
 
+    /// Runs the statements of a commit in one transaction. Each must change exactly one row, or
+    /// the whole transaction is rolled back and nothing is changed. Meant for a session of its
+    /// own: a failure mid-way can never leave a shared session inside a transaction.
+    pub async fn apply_edits(&self, statements: &[Statement]) -> Result<u64, DbError> {
+        self.client.batch_execute("BEGIN").await?;
+        let mut total = 0;
+        for (i, st) in statements.iter().enumerate() {
+            let refs: Vec<&(dyn ToSql + Sync)> = st.params.iter().map(|p| p as &(dyn ToSql + Sync)).collect();
+            let n = match self.client.execute(&st.sql, &refs).await {
+                Ok(n) => n,
+                Err(e) => {
+                    let _ = self.client.batch_execute("ROLLBACK").await;
+                    return Err(e.into());
+                }
+            };
+            if n != 1 {
+                let _ = self.client.batch_execute("ROLLBACK").await;
+                return Err(DbError::msg(format!("Statement {} matched {n} rows instead of 1; nothing was changed.", i + 1)));
+            }
+            total += n;
+        }
+        self.client.batch_execute("COMMIT").await?;
+        Ok(total)
+    }
+
     /// Runs user SQL, which may hold several statements. Returns one result per statement.
     pub async fn run(&self, sql: &str) -> Result<Vec<ResultSet>, DbError> {
         run_simple(&self.client, sql).await
@@ -573,6 +598,123 @@ pub struct BrowseRequest {
     pub sort: Option<Sort>,
     pub limit: u32,
     pub offset: u64,
+}
+
+/// One cell of an edit: the column and its new text, `None` for SQL NULL.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CellEdit {
+    pub column: String,
+    pub value: Option<String>,
+}
+
+/// One row's edits. `key` holds every primary-key column with the value the row had when it was
+/// read, so the UPDATE finds exactly that row.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RowEdit {
+    pub key: Vec<CellEdit>,
+    pub set: Vec<CellEdit>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EditPlan {
+    pub rows: Vec<RowEdit>,
+}
+
+/// One UPDATE with its bound values; `None` binds SQL NULL.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Statement {
+    pub sql: String,
+    pub params: Vec<Option<String>>,
+}
+
+/// The statements a plan would run, and the same as text for the user to read before committing.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EditPreview {
+    pub statements: Vec<Statement>,
+    pub text: String,
+}
+
+/// The most rows one commit may change.
+pub const MAX_EDIT_ROWS: usize = 500;
+
+/// Turns a plan into one UPDATE per row, every value bound and cast to the column's catalog type:
+/// `UPDATE "public"."users" SET "plan" = ($1::text)::text WHERE "id" = ($2::text)::integer`.
+/// Column names must come from the catalog, the key must name every primary-key column, and a
+/// primary-key column cannot be set, so an edit can never move to another row.
+pub fn build_updates(schema: &str, table: &str, columns: &[Column], plan: &EditPlan) -> Result<Vec<Statement>, DbError> {
+    let pk: Vec<&Column> = columns.iter().filter(|c| c.primary_key).collect();
+    if pk.is_empty() {
+        return Err(DbError::msg(format!("{table} has no primary key, so its rows cannot be edited inline.")));
+    }
+    if plan.rows.is_empty() {
+        return Err(DbError::msg("There is nothing to commit."));
+    }
+    if plan.rows.len() > MAX_EDIT_ROWS {
+        return Err(DbError::msg(format!("A commit changes at most {MAX_EDIT_ROWS} rows; this one has {}.", plan.rows.len())));
+    }
+    let find = |name: &str| columns.iter().find(|c| c.name == name).ok_or_else(|| DbError::msg(format!("Unknown column {name}.")));
+    let target = format!("{}.{}", quote_ident(schema), quote_ident(table));
+    let mut out = Vec::with_capacity(plan.rows.len());
+    for (i, row) in plan.rows.iter().enumerate() {
+        let at = |what: &str| DbError::msg(format!("Row {}: {what}", i + 1));
+        let mut params: Vec<Option<String>> = Vec::new();
+        let mut bind = |c: &Column, v: Option<String>| {
+            params.push(v);
+            format!("(${}::text)::{}", params.len(), c.type_name.as_deref().unwrap_or("text"))
+        };
+        if row.set.is_empty() {
+            return Err(at("nothing is set."));
+        }
+        let mut sets = Vec::new();
+        let mut seen: Vec<&str> = Vec::new();
+        for e in &row.set {
+            let c = find(&e.column)?;
+            if c.primary_key {
+                return Err(at(&format!("{} is part of the primary key, which is not editable inline.", c.name)));
+            }
+            if seen.contains(&c.name.as_str()) {
+                return Err(at(&format!("{} is set twice.", c.name)));
+            }
+            seen.push(&c.name);
+            sets.push(format!("{} = {}", quote_ident(&c.name), bind(c, e.value.clone())));
+        }
+        let mut wheres = Vec::new();
+        for c in &pk {
+            let k = row.key.iter().filter(|k| k.column == c.name).collect::<Vec<_>>();
+            let k = match k.as_slice() {
+                [one] => *one,
+                [] => return Err(at(&format!("the key is missing {}.", c.name))),
+                _ => return Err(at(&format!("the key names {} twice.", c.name))),
+            };
+            let Some(v) = &k.value else { return Err(at(&format!("{} is NULL in the key.", c.name))) };
+            wheres.push(format!("{} = {}", quote_ident(&c.name), bind(c, Some(v.clone()))));
+        }
+        out.push(Statement { sql: format!("UPDATE {target} SET {} WHERE {}", sets.join(", "), wheres.join(" AND ")), params });
+    }
+    Ok(out)
+}
+
+/// The statements as the review text: a transaction, each UPDATE under a comment naming its row,
+/// and the bound values after it.
+pub fn preview_text(schema: &str, table: &str, statements: &[Statement], plan: &EditPlan) -> String {
+    let lit = |v: &Option<String>| match v {
+        None => "NULL".to_string(),
+        Some(s) => format!("'{}'", s.replace('\'', "''")),
+    };
+    let mut text = String::from("BEGIN;\n");
+    for (st, row) in statements.iter().zip(&plan.rows) {
+        let key = row.key.iter().map(|k| format!("{} = {}", k.column, lit(&k.value))).collect::<Vec<_>>().join(" and ");
+        text.push_str(&format!("\n-- {schema}.{table} where {key}\n{};\n", st.sql));
+        let values = st.params.iter().enumerate().map(|(i, p)| format!("${} = {}", i + 1, lit(p))).collect::<Vec<_>>().join(", ");
+        text.push_str(&format!("-- {values}\n"));
+    }
+    text.push_str("\nCOMMIT;\n");
+    text
 }
 
 #[derive(Debug, Clone, Copy, Serialize)]
@@ -954,6 +1096,68 @@ mod tests {
         );
         assert_eq!((fks[1].name.as_str(), fks[1].ref_table.as_str()), ("orders_zone_fk", "users"));
         assert!(fold_foreign_keys(vec![]).is_empty());
+    }
+
+    fn cell(column: &str, value: Option<&str>) -> CellEdit {
+        CellEdit { column: column.into(), value: value.map(str::to_string) }
+    }
+
+    #[test]
+    fn edits_become_one_bound_update_per_row_found_by_its_key() {
+        let plan = EditPlan {
+            rows: vec![
+                RowEdit { key: vec![cell("id", Some("1049"))], set: vec![cell("plan", Some("team")), cell("last_login", None)] },
+                RowEdit { key: vec![cell("id", Some("7"))], set: vec![cell("email", Some("o'neil@acme.dev"))] },
+            ],
+        };
+        let st = build_updates("public", "users", &users(), &plan).unwrap();
+        assert_eq!(st.len(), 2);
+        assert_eq!(
+            st[0].sql,
+            "UPDATE \"public\".\"users\" SET \"plan\" = ($1::text)::character varying(255), \"last_login\" = ($2::text)::timestamp with time zone WHERE \"id\" = ($3::text)::integer"
+        );
+        assert_eq!(st[0].params, [Some("team".to_string()), None, Some("1049".to_string())]);
+        let text = preview_text("public", "users", &st, &plan);
+        assert!(text.starts_with("BEGIN;\n") && text.ends_with("COMMIT;\n"), "{text}");
+        assert!(text.contains("-- public.users where id = '1049'\n"), "{text}");
+        assert!(text.contains("-- $1 = 'team', $2 = NULL, $3 = '1049'\n"), "{text}");
+        assert!(text.contains("$1 = 'o''neil@acme.dev'"), "quotes are doubled: {text}");
+    }
+
+    #[test]
+    fn edits_are_refused_when_they_could_change_the_wrong_row() {
+        let e = |rows: Vec<RowEdit>, cols: &[Column]| build_updates("public", "users", cols, &EditPlan { rows }).unwrap_err().message;
+        let ok = || vec![cell("plan", Some("team"))];
+        assert!(e(vec![RowEdit { key: vec![cell("id", Some("1"))], set: ok() }], &[col("a", "text", false)]).contains("no primary key"));
+        assert!(e(vec![], &users()).contains("nothing to commit"));
+        assert!(e(vec![RowEdit { key: vec![], set: ok() }], &users()).contains("missing id"));
+        assert!(e(vec![RowEdit { key: vec![cell("id", None)], set: ok() }], &users()).contains("NULL in the key"));
+        assert!(e(vec![RowEdit { key: vec![cell("id", Some("1")), cell("id", Some("2"))], set: ok() }], &users()).contains("twice"));
+        assert!(e(vec![RowEdit { key: vec![cell("id", Some("1"))], set: vec![] }], &users()).contains("nothing is set"));
+        assert!(e(vec![RowEdit { key: vec![cell("id", Some("1"))], set: vec![cell("id", Some("2"))] }], &users()).contains("primary key"));
+        assert!(e(vec![RowEdit { key: vec![cell("id", Some("1"))], set: vec![cell("nope", Some("2"))] }], &users())
+            .contains("Unknown column nope"));
+        assert!(e(
+            vec![RowEdit { key: vec![cell("id", Some("1"))], set: vec![cell("plan", Some("a")), cell("plan", Some("b"))] }],
+            &users()
+        )
+        .contains("set twice"));
+        let many: Vec<RowEdit> = (0..=MAX_EDIT_ROWS).map(|i| RowEdit { key: vec![cell("id", Some(&i.to_string()))], set: ok() }).collect();
+        assert!(e(many, &users()).contains("at most 500"));
+        // A composite key needs every column, in any order.
+        let cols = vec![col("a", "integer", true), col("b", "text", true), col("v", "text", false)];
+        let st = build_updates(
+            "s",
+            "t",
+            &cols,
+            &EditPlan { rows: vec![RowEdit { key: vec![cell("b", Some("x")), cell("a", Some("1"))], set: vec![cell("v", None)] }] },
+        )
+        .unwrap();
+        assert_eq!(
+            st[0].sql,
+            "UPDATE \"s\".\"t\" SET \"v\" = ($1::text)::text WHERE \"a\" = ($2::text)::integer AND \"b\" = ($3::text)::text"
+        );
+        assert!(e(vec![RowEdit { key: vec![cell("a", Some("1"))], set: vec![cell("v", None)] }], &cols).contains("missing b"));
     }
 
     #[test]

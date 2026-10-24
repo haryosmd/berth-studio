@@ -11,6 +11,8 @@ const COMMANDS: &[&str] = &[
     "browse_table",
     "count_rows",
     "describe_table",
+    "preview_edits",
+    "commit_edits",
     "run_query",
     "cancel_query",
     "mongo_overview",

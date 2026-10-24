@@ -6,10 +6,10 @@ mod app;
 mod update;
 mod workspace;
 
-use app::{App, DocumentWrite, EndpointCheck, MongoOverview, Page, PasswordInput, RunResult, WriteOutcome};
+use app::{App, DocumentWrite, EditOutcome, EndpointCheck, MongoOverview, Page, PasswordInput, RunResult, WriteOutcome};
 use berth_core::{Connection, Engine, EnvId, Environment, Profile, RouteMode};
 use berth_mongo::{CollectionInfo, Documents, FindRequest};
-use berth_postgres::{BrowseRequest, DbError, RowCount, Table, TableInfo};
+use berth_postgres::{BrowseRequest, DbError, EditPlan, EditPreview, RowCount, Table, TableInfo};
 use tauri::ipc::Channel;
 use tauri::{AppHandle, Manager, State};
 use update::{Pending, Progress, UpdateInfo};
@@ -71,6 +71,31 @@ async fn browse_table(
 #[tauri::command]
 async fn describe_table(app: State<'_, App>, id: String, env: EnvId, schema: String, table: String) -> Result<TableInfo, DbError> {
     app.describe_table(&id, &env, &schema, &table).await
+}
+
+#[tauri::command]
+async fn preview_edits(
+    app: State<'_, App>,
+    id: String,
+    env: EnvId,
+    schema: String,
+    table: String,
+    plan: EditPlan,
+) -> Result<EditPreview, DbError> {
+    app.preview_edits(&id, &env, &schema, &table, &plan).await
+}
+
+#[tauri::command]
+async fn commit_edits(
+    app: State<'_, App>,
+    id: String,
+    env: EnvId,
+    schema: String,
+    table: String,
+    plan: EditPlan,
+    confirm: Option<String>,
+) -> Result<EditOutcome, DbError> {
+    app.commit_edits(&id, &env, &schema, &table, &plan, confirm.as_deref()).await
 }
 
 #[tauri::command]
@@ -206,6 +231,8 @@ fn main() {
             browse_table,
             count_rows,
             describe_table,
+            preview_edits,
+            commit_edits,
             run_query,
             cancel_query,
             mongo_overview,
