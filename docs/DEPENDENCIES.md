@@ -33,7 +33,7 @@ Every dependency is attack surface, so each one is here with the reason it exist
 | `tauri`, `tauri-build` | =2.12.1, =2.7.1 (with `tauri-runtime`, `-utils`, `-codegen`, `-macros` held at the matching week-old releases) | The desktop shell: window, IPC, permissions | Tauri Programme (Commons Conservancy); security audits published |
 | `serde`, `serde_json` | 1.0.229, 1.0.151 | Typed IPC and the workspace file | De facto standard; dtolnay |
 | `thiserror` | 2.0.21 | Error types without boilerplate | dtolnay |
-| `tokio` | 1.53.2 | Async runtime (only `rt`, `time`, `sync`) | tokio-rs |
+| `tokio` | 1.53.3 | Async runtime (only `rt`, `time`, `sync`) | tokio-rs |
 | `tokio-postgres` | 0.7.18 | PostgreSQL protocol, no compile-time database needed | rust-postgres (sfackler) |
 | `tokio-postgres-rustls`, `rustls` | 0.14.0, 0.23.46 | TLS to the database without OpenSSL | rustls is audited (Cure53) |
 | `rustls-platform-verifier` | 0.7.1 | Checks certificates against the macOS trust store, host name included | rustls org |
