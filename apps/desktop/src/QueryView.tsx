@@ -1,17 +1,18 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
 import { EditorView, basicSetup } from 'codemirror';
 import { keymap } from '@codemirror/view';
-import { Prec } from '@codemirror/state';
+import { Compartment, Prec } from '@codemirror/state';
 import { sql, PostgreSQL } from '@codemirror/lang-sql';
 import { HighlightStyle, syntaxHighlighting } from '@codemirror/language';
 import { tags as t } from '@lezer/highlight';
 import { api } from './api';
+import { ExportMenu } from './ExportMenu';
 import { Grid } from './Grid';
 import { Placeholder, Spinner } from './Status';
 import { Icon } from './Icons';
-import { lineCol, newRunId } from './logic';
+import { lineCol, newRunId, toSqlNamespace } from './logic';
 import { ConfirmDialog } from './ConfirmDialog';
-import { CONFIRM_CODE, NO_WRITE, type DbError, type EnvId, type RouteMode, type RunResult } from './types';
+import { CONFIRM_CODE, NO_WRITE, type DbError, type EnvId, type RouteMode, type RunResult, type SchemaColumn } from './types';
 import type { Status } from './App';
 
 // Syntax colours come from the design tokens, so they follow the light and dark themes.
@@ -34,7 +35,8 @@ const chrome = EditorView.theme({
   '.cm-matchingBracket': { backgroundColor: 'var(--sel)', outline: '1px solid var(--accent-line)' },
 });
 
-const START = `-- Reads go to a read replica when the profile has one; writes stay on the primary.
+/** What a new query tab starts with. */
+export const START = `-- Reads go to a read replica when the profile has one; writes stay on the primary.
 SELECT id, email, plan, last_login
   FROM users
  ORDER BY last_login DESC NULLS LAST
@@ -49,12 +51,30 @@ interface Props {
   hasWrite: boolean;
   envControl: ReactNode;
   onStatus: (s: Status) => void;
+  /** The tab's text, kept by App so switching tabs does not lose it. */
+  initialSql: string;
+  onChange: (sql: string) => void;
+  /** After every run that reached the server, so the history (and, after DDL, the schema cache) can refresh. */
+  onRan: (sql: string) => void;
+  /** The tab's name, which exports are named after. */
+  title: string;
+  /** Every readable column of the connection, for completion; null until the cache has loaded. */
+  schema: SchemaColumn[] | null;
+  onSave: () => void;
+  onHistory: () => void;
+  /** Text to put at the cursor, such as a statement picked from the history; `seq` makes each request new. */
+  inject: { sql: string; seq: number } | null;
 }
 
-export function QueryView({ conn, env, envLabel, hasRead, hasWrite, envControl, onStatus }: Props) {
+export function QueryView({ conn, env, envLabel, hasRead, hasWrite, envControl, onStatus, initialSql, onChange, onRan, onSave, onHistory, inject, schema, title }: Props) {
   const host = useRef<HTMLDivElement>(null);
   const view = useRef<EditorView | null>(null);
   const runRef = useRef<() => void>(() => {});
+  const changeRef = useRef(onChange);
+  changeRef.current = onChange;
+  const lang = useRef(new Compartment());
+  const language = (cols: SchemaColumn[] | null) =>
+    sql({ dialect: PostgreSQL, ...(cols ? { schema: toSqlNamespace(cols), defaultSchema: 'public' } : {}) });
   const [mode, setMode] = useState<RouteMode>('auto');
   const [result, setResult] = useState<RunResult | null>(null);
   const [error, setError] = useState<{ e: DbError; sql: string } | null>(null);
@@ -65,19 +85,33 @@ export function QueryView({ conn, env, envLabel, hasRead, hasWrite, envControl, 
   useEffect(() => {
     if (!host.current) return;
     const v = new EditorView({
-      doc: START,
+      doc: initialSql,
       parent: host.current,
       extensions: [
         basicSetup,
-        sql({ dialect: PostgreSQL }),
+        lang.current.of(language(schema)),
         syntaxHighlighting(highlight),
         chrome,
         Prec.highest(keymap.of([{ key: 'Mod-Enter', run: () => (runRef.current(), true) }])),
+        EditorView.updateListener.of(u => { if (u.docChanged) changeRef.current(u.state.doc.toString()); }),
       ],
     });
     view.current = v;
     return () => v.destroy();
+    // The editor is created once per tab; later text comes from the editor itself.
   }, []);
+  // Completion learns the schema once the cache arrives, and again whenever it is reloaded.
+  useEffect(() => { view.current?.dispatch({ effects: lang.current.reconfigure(language(schema)) }); }, [schema]);
+  useEffect(() => {
+    const v = view.current;
+    if (!v || !inject) return;
+    const { from, to } = v.state.selection.main;
+    // At the end of a line that already holds text, the statement starts on a line of its own.
+    const line = v.state.doc.lineAt(from);
+    const insert = (line.text.trim() && from === line.to ? '\n' : '') + inject.sql;
+    v.dispatch({ changes: { from, to, insert }, selection: { anchor: from + insert.length } });
+    v.focus();
+  }, [inject]);
 
   const execute = useCallback(async (text: string, typed: string | null) => {
     const runId = newRunId();
@@ -89,14 +123,15 @@ export function QueryView({ conn, env, envLabel, hasRead, hasWrite, envControl, 
       setActive(Math.max(0, r.results.findIndex(s => s.columns.length > 0)));
       const rows = r.results.reduce((n, s) => n + s.rows.length, 0);
       onStatus({ role: r.role, host: r.host, detail: `${rows} rows · ${r.elapsedMs} ms`, readOnly: r.readOnly });
+      onRan(text);
     } catch (e) {
       const err = e as DbError;
       if (err.code === CONFIRM_CODE) setConfirm(text);
-      else setError({ e: err, sql: text });
+      else { setError({ e: err, sql: text }); onRan(text); }
     } finally {
       setRunning(null);
     }
-  }, [conn, env, mode, onStatus]);
+  }, [conn, env, mode, onStatus, onRan]);
 
   const run = useCallback(() => {
     const v = view.current;
@@ -116,6 +151,8 @@ export function QueryView({ conn, env, envLabel, hasRead, hasWrite, envControl, 
         {running
           ? <button className="btn danger" onClick={() => api.cancelQuery(running)}><Spinner />Cancel</button>
           : <button className="btn primary" onClick={run}><Icon name="play" />Run<kbd>⌘↵</kbd></button>}
+        <button className="btn" onClick={onSave} title="Save this query in the workspace"><Icon name="bookmark" />Save<kbd>⌘S</kbd></button>
+        <button className="iconbtn" onClick={onHistory} aria-label={`Query history of ${conn}`} title="Query history"><Icon name="clock" /></button>
         <span className="grow" />
         {envControl}
         <label className="target" title="Where this query runs">
@@ -139,6 +176,7 @@ export function QueryView({ conn, env, envLabel, hasRead, hasWrite, envControl, 
           ))}
           <span style={{ flex: 1 }} />
           {result && <span className={`chip ${result.role}`} title={result.reason}>ran on {result.role} · {result.host} · {result.elapsedMs} ms</span>}
+          {set && set.columns.length > 0 && <ExportMenu name={title} columns={set.columns.map(c => c.name)} rows={set.rows} partial={set.truncated} />}
         </div>
         {running && set && <div className="note running"><Spinner />Running… the results below are from the previous run.</div>}
         {result?.warn && <div className="note">{result.warn}</div>}

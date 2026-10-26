@@ -4,6 +4,7 @@
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react';
 import { api } from './api';
 import { ConfirmDialog } from './ConfirmDialog';
+import { ExportMenu } from './ExportMenu';
 import { Grid } from './Grid';
 import { Icon } from './Icons';
 import { Placeholder, Spinner } from './Status';
@@ -105,7 +106,7 @@ export function CollectionView({ conn, env, envLabel, db, collection, readOnly, 
   return (
     <div className="pane">
       <div className="toolbar">
-        <span className="crumb"><span className="faint">{conn} · {db}.</span>{collection}</span>
+        <span className="crumb"><Icon name="leaf" size={12} /><span>{conn} · {envLabel}</span><Icon name="chev" size={12} /><span>{db}</span><Icon name="chev" size={12} /><b>{collection}</b></span>
         <div className="rtabs inline" role="tablist">
           {(['documents', 'aggregate', 'indexes'] as Mode[]).map(m => (
             <button key={m} role="tab" aria-selected={mode === m} onClick={() => { setMode(m); setResult(null); setError(null); }}>
@@ -116,6 +117,10 @@ export function CollectionView({ conn, env, envLabel, db, collection, readOnly, 
         <span className="grow" />
         {envControl}
         {readOnly && <span className="chip read" title="This profile opens read-only">read-only</span>}
+        {mode !== 'indexes' && (
+          <ExportMenu name={collection} columns={grid.columns.map(c => c.name)} rows={grid.rows} partial={result?.truncated}
+            json={() => `${JSON.stringify(result?.documents ?? [], null, 2)}\n`} />
+        )}
       </div>
 
       {mode === 'documents' && (

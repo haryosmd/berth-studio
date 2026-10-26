@@ -1,5 +1,7 @@
 // Pure helpers for the interface. No DOM and no IPC, so tests/ can run them with node --test.
-import type { Column, Connection, Endpoint, Engine, EnvId, Environment, Json, Profile, Role } from './types';
+import type {
+  Column, Connection, EditPlan, Endpoint, Engine, EnvId, Environment, Filter, FilterOp, ForeignKey, Json, Profile, Role, RowCount, SchemaColumn, Sort, Table,
+} from './types';
 
 /** The environments a new workspace starts with; the Rust side owns the real list. */
 export const DEFAULT_ENVIRONMENTS: Environment[] = [
@@ -45,6 +47,165 @@ export function hasRead(p: Profile | undefined): boolean {
 
 export function hasWrite(p: Profile | undefined): boolean {
   return !!p?.endpoints.some(e => e.role === 'write');
+}
+
+/** Tables grouped by schema for the sidebar: `public` first, the rest in the order the catalog listed them. */
+export function groupBySchema(tables: Table[]): { schema: string; tables: Table[] }[] {
+  const groups: { schema: string; tables: Table[] }[] = [];
+  for (const t of tables) {
+    let g = groups.find(x => x.schema === t.schema);
+    if (!g) groups.push((g = { schema: t.schema, tables: [] }));
+    g.tables.push(t);
+  }
+  return groups.sort((a, b) => (a.schema === 'public' ? -1 : b.schema === 'public' ? 1 : 0));
+}
+
+/** The sidebar filter: a case-insensitive substring of any label. An empty filter matches everything. */
+export function matchesFilter(needle: string, ...labels: string[]): boolean {
+  const q = needle.trim().toLowerCase();
+  return !q || labels.some(l => l.toLowerCase().includes(q));
+}
+
+/** What the status bar says about a table tab: whether rows can be changed, and why not. */
+export function browseStatus(p: Profile | undefined, production: boolean, canEdit: boolean): string {
+  if (!p || !hasWrite(p)) return 'read-only profile';
+  if (production) return canEdit ? 'production · an edit asks for the connection name' : 'production is read-only';
+  if (p.readOnly) return 'read-only profile';
+  return canEdit ? 'editable · changes are reviewed before commit' : 'read-write profile';
+}
+
+/** The primary-key values of a row, as the key edits are grouped by. */
+export function rowKey(row: (string | null)[], columns: Column[]): string {
+  return JSON.stringify(columns.flatMap((c, i) => (c.primaryKey ? [row[i]] : [])));
+}
+
+export function editKey(key: string, column: string): string {
+  return JSON.stringify([key, column]);
+}
+
+/** What a typed cell means: empty or `NULL` is SQL NULL. */
+export function parseCellInput(text: string): string | null {
+  return text === '' || text === 'NULL' ? null : text;
+}
+
+/** Groups pending edits by row; the key holds the values the row had when it was read. */
+export function editsToPlan(edits: Record<string, string | null>, rows: (string | null)[][], columns: Column[]): EditPlan {
+  const byKey = new Map<string, (string | null)[]>();
+  for (const r of rows) byKey.set(rowKey(r, columns), r);
+  const plan = new Map<string, EditPlan['rows'][number]>();
+  for (const [k, value] of Object.entries(edits)) {
+    const [key, column] = JSON.parse(k) as [string, string];
+    const row = byKey.get(key);
+    if (!row) continue;
+    let entry = plan.get(key);
+    if (!entry) {
+      entry = { key: columns.flatMap((c, i) => (c.primaryKey ? [{ column: c.name, value: row[i] }] : [])), set: [] };
+      plan.set(key, entry);
+    }
+    entry.set.push({ column, value });
+  }
+  return { rows: [...plan.values()] };
+}
+
+/** Whether a grid can be edited, and the reason when it cannot. */
+export function canEditTable(columns: Column[], kind?: string): { ok: boolean; reason?: string } {
+  if (kind && kind !== 'table' && kind !== 'partitioned table') return { ok: false, reason: `A ${kind} cannot be edited inline` };
+  if (!columns.some(c => c.primaryKey)) return { ok: false, reason: 'No primary key, so rows cannot be edited inline' };
+  return { ok: true };
+}
+
+/** The filter operators, in menu order. */
+export const OPS: { op: FilterOp; label: string; needsValue: boolean }[] = [
+  { op: 'eq', label: '=', needsValue: true },
+  { op: 'ne', label: '≠', needsValue: true },
+  { op: 'lt', label: '<', needsValue: true },
+  { op: 'le', label: '≤', needsValue: true },
+  { op: 'gt', label: '>', needsValue: true },
+  { op: 'ge', label: '≥', needsValue: true },
+  { op: 'contains', label: 'contains', needsValue: true },
+  { op: 'startsWith', label: 'starts with', needsValue: true },
+  { op: 'isNull', label: 'is null', needsValue: false },
+  { op: 'isNotNull', label: 'is not null', needsValue: false },
+  { op: 'in', label: 'in', needsValue: true },
+];
+
+/** A chip's text: `plan ≠ 'deleted'`, `last_login is null`, `id in (1, 2, 3)`. */
+export function filterText(f: Filter): string {
+  const label = OPS.find(o => o.op === f.op)?.label ?? f.op;
+  if (f.op === 'isNull' || f.op === 'isNotNull') return `${f.column} ${label}`;
+  if (f.op === 'in') return `${f.column} in (${(f.values ?? []).join(', ')})`;
+  return `${f.column} ${label} '${f.value ?? ''}'`;
+}
+
+/** The values of an `in` filter as typed: split on commas or newlines, trimmed, without repeats. */
+export function parseInValues(text: string): string[] {
+  const out: string[] = [];
+  for (const v of text.split(/[,\n]/).map(x => x.trim())) if (v && !out.includes(v)) out.push(v);
+  return out;
+}
+
+/** Indexes of the rows whose any cell contains `needle`, case-insensitively; every row when it is blank. */
+export function findRows(rows: (string | null)[][], needle: string): number[] {
+  const q = needle.trim().toLowerCase();
+  if (!q) return rows.map((_, i) => i);
+  return rows.flatMap((r, i) => (r.some(v => v !== null && v.toLowerCase().includes(q)) ? [i] : []));
+}
+
+/** 1.3k, 8.0k, 2.4M: row counts for the sidebar and footer. */
+export function compact(n: number): string {
+  if (n < 1000) return String(n);
+  if (n < 1_000_000) return `${(n / 1000).toFixed(1)}k`;
+  return `${(n / 1_000_000).toFixed(1)}M`;
+}
+
+/** "Rows 1–200 of 1,300" with an exact count, "Rows 1–200 of ~1.3k" with an estimate, "Rows 1–200" without one. */
+export function rowCountText(offset: number, shown: number, count: RowCount | null): string {
+  if (!shown) return '';
+  const range = `Rows ${(offset + 1).toLocaleString('en-US')}–${(offset + shown).toLocaleString('en-US')}`;
+  if (!count || count.total === null) return range;
+  return count.exact ? `${range} of ${count.total.toLocaleString('en-US')}` : `${range} of ~${compact(count.total)}`;
+}
+
+/** Marks each column that is part of a foreign key with the column it points at. */
+export function attachForeignKeys(columns: Column[], fks: ForeignKey[]): Column[] {
+  return columns.map(c => {
+    for (const fk of fks) {
+      const i = fk.columns.indexOf(c.name);
+      if (i >= 0) return { ...c, fk: { schema: fk.refSchema, table: fk.refTable, column: fk.refColumns[i] } };
+    }
+    return c;
+  });
+}
+
+/** `→ orgs.id`; the schema shows only when it is not `public`. */
+export function fkLabel(fk: { schema: string; table: string; column: string }): string {
+  return `→ ${tableLabel(fk.schema, fk.table)}.${fk.column}`;
+}
+
+export function tableLabel(schema: string, table: string): string {
+  return schema === 'public' ? table : `${schema}.${table}`;
+}
+
+/**
+ * The chips that open the other side of a foreign key for one row: the row it points at
+ * (`out`), or the rows that point at it (`in`). Null when a key value is NULL, which no row matches.
+ */
+export function fkFilters(fk: ForeignKey, row: (string | null)[], columns: Column[], direction: 'out' | 'in'): Filter[] | null {
+  const from = direction === 'out' ? fk.columns : fk.refColumns;
+  const to = direction === 'out' ? fk.refColumns : fk.columns;
+  const out: Filter[] = [];
+  for (let i = 0; i < from.length; i++) {
+    const v = row[columns.findIndex(c => c.name === from[i])];
+    if (v === null || v === undefined) return null;
+    out.push({ column: to[i], op: 'eq', value: v });
+  }
+  return out;
+}
+
+/** Clicking a header cycles none → ascending → descending → none for that column. */
+export function nextSort(current: Sort | null, column: string): Sort | null {
+  if (!current || current.column !== column) return { column, descending: false };
+  return current.descending ? null : { column, descending: true };
 }
 
 /** Index of an endpoint among the endpoints that share its role (how passwords are matched). */
@@ -126,7 +287,7 @@ export function cellKind(value: string | null, col: Column | undefined): CellKin
   return 'str';
 }
 
-/** Postgres sends booleans as t / f in text form. */
+/** Postgres sends booleans as t / f through the simple protocol and as true / false when cast to text. */
 export function display(value: string | null, col: Column | undefined): string {
   if (value === null) return 'NULL';
   if (col?.typeName === 'boolean') return value === 't' ? 'true' : value === 'f' ? 'false' : value;
@@ -220,4 +381,104 @@ export function lineCol(sql: string, position: number): { line: number; col: num
 export function formatBytes(n: number): string {
   if (n < 1024 * 1024) return `${Math.max(0, Math.round(n / 1024))} KB`;
   return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+/** The line a history row or tab shows for some SQL: the first one that is not blank or a `--` comment. */
+export function sqlSummary(sql: string): string {
+  const lines = sql.split('\n').map(l => l.trim()).filter(Boolean);
+  return (lines.find(l => !l.startsWith('--')) ?? lines[0] ?? '').replace(/\s+/g, ' ');
+}
+
+/** "Today", "Yesterday" or "Mon, Oct 20", for grouping history by local day. */
+export function historyDay(at: number, now = Date.now()): string {
+  const day = (t: number) => { const d = new Date(t); return new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime(); };
+  const diff = Math.round((day(now) - day(at)) / 86_400_000);
+  if (diff === 0) return 'Today';
+  if (diff === 1) return 'Yesterday';
+  return new Date(at).toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' });
+}
+
+/** 24-hour "09:02" in local time. */
+export function clockTime(at: number): string {
+  const d = new Date(at);
+  return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+}
+
+// A spreadsheet runs a cell that starts with one of these as a formula. Values come from the
+// server and are untrusted, so such a cell gets a leading apostrophe, unless it is just a number.
+const FORMULA_START = /^[=+\-@\t\r]/;
+const PLAIN_NUMBER = /^[+-]?(\d+(\.\d*)?|\.\d+)(e[+-]?\d+)?$/i;
+
+function csvCell(v: string | null): string {
+  if (v === null) return '';
+  const s = FORMULA_START.test(v) && !PLAIN_NUMBER.test(v) ? `'${v}` : v;
+  return /[",\r\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+}
+
+/** RFC 4180 CSV with a header row; NULL is an empty field. */
+export function toCsv(columns: string[], rows: (string | null)[][]): string {
+  return [columns, ...rows].map(r => r.map(csvCell).join(',')).join('\r\n') + '\r\n';
+}
+
+/** Column names made unique for JSON keys: a repeated name becomes name_2, name_3… */
+export function uniqueNames(columns: string[]): string[] {
+  const taken = new Set<string>();
+  return columns.map(name => {
+    let key = name;
+    for (let n = 2; taken.has(key); n++) key = `${name}_${n}`;
+    taken.add(key);
+    return key;
+  });
+}
+
+/** An array of objects, one per row. Values stay the text the server sent; NULL is null. */
+export function toJson(columns: string[], rows: (string | null)[][]): string {
+  const keys = uniqueNames(columns);
+  return JSON.stringify(rows.map(r => Object.fromEntries(keys.map((k, i) => [k, r[i] ?? null]))), null, 2) + '\n';
+}
+
+/** A file name for an export: the table or query name with anything unusual replaced. */
+export function exportName(base: string, ext: 'csv' | 'json'): string {
+  const clean = base.trim().replace(/\.(sql|csv|json)$/i, '').replace(/[^A-Za-z0-9._-]+/g, '-').replace(/^[-.]+|[-.]+$/g, '');
+  return `${clean || 'export'}.${ext}`;
+}
+
+/** A completion option as @codemirror/autocomplete takes it, built here without importing it. */
+export interface SqlCompletion { label: string; type: string; detail?: string }
+
+/** The schema cache in the shape lang-sql completes from: schema → table → columns. */
+export function toSqlNamespace(cols: SchemaColumn[]): Record<string, Record<string, SqlCompletion[]>> {
+  const out: Record<string, Record<string, SqlCompletion[]>> = {};
+  for (const c of cols) {
+    const tables = (out[c.schema] ??= {});
+    (tables[c.table] ??= []).push({ label: c.column, type: 'property', detail: c.typeName });
+  }
+  return out;
+}
+
+/**
+ * Scores `text` for the command palette: the query's characters must appear in order. Runs of
+ * consecutive characters, word starts and a prefix match score higher; `null` means no match.
+ */
+export function fuzzyScore(query: string, text: string): number | null {
+  const q = query.trim().toLowerCase().replace(/\s+/g, ' ');
+  if (!q) return 0;
+  const t = text.toLowerCase();
+  let score = 0, from = 0, prev = -2;
+  for (const ch of q) {
+    if (ch === ' ') continue;
+    const i = t.indexOf(ch, from);
+    if (i < 0) return null;
+    if (i === prev + 1) score += 3;
+    if (i === 0 || /[\s._\-/·|]/.test(t[i - 1])) score += 2;
+    score -= Math.min(i - from, 5) * 0.1;
+    prev = i;
+    from = i + 1;
+  }
+  if (t.startsWith(q)) score += 5;
+  else if (t.includes(q)) score += 3;
+  // "nc" for "New connection": the query spells the words' initials.
+  const initials = t.split(/[\s._\-/·|]+/).map(w => w[0] ?? '').join('');
+  if (initials.startsWith(q.replace(/ /g, ''))) score += 6;
+  return score;
 }

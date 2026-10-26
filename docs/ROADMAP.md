@@ -42,13 +42,14 @@ Done:
 - [x] Provider specifications checked against official documentation: [providers/](providers/README.md).
 
 Next:
-- [ ] Filter bar in the table browser (filters become parameterised queries)
+- [x] Filter bar in the table browser (filters become parameterised queries), column sort, row counts and find-in-results
 - [ ] Inline editing with an SQL review step and a single-transaction commit
-- [ ] Export results to CSV and JSON
-- [ ] SQL autocomplete from a schema cache
-- [ ] Command palette (⌘K) and sidebar filter
+- [x] Export results to CSV and JSON, through the native Save dialog
+- [x] SQL autocomplete from a schema cache
+- [x] Command palette (⌘K); the sidebar filter (⌘P) is done
+- [x] Saved queries in the workspace, and a table's Structure, Indexes and DDL
 - [ ] SSH tunnels with host-key verification
-- [ ] Query history in a local SQLite store
+- [x] Query history, local to the Mac (a JSON Lines file, newest 5,000 runs)
 - [ ] Continuous integration, running the workflow in `.github/workflows/ci.yml` on every pull request
 
 ## Stage 2: diagrams and MongoDB depth

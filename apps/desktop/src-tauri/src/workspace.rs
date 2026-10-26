@@ -1,6 +1,7 @@
 //! The workspace file: environments, connections and their profiles, never secrets.
 //! It lives in the app data folder as `workspace.json`, readable by the user only.
 //! Version 1 files had no environment list; they load with the default dev, staging and prod.
+//! Saved queries are part of the workspace, so they travel with it; query history is not (history.rs).
 
 use berth_core::{default_environments, validate_environments, Connection, Environment};
 use serde::{Deserialize, Serialize};
@@ -18,6 +19,17 @@ pub struct Workspace {
     pub environments: Vec<Environment>,
     #[serde(default)]
     pub connections: Vec<Connection>,
+    #[serde(default)]
+    pub saved_queries: Vec<SavedQuery>,
+}
+
+/// A query kept by name, for one connection.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SavedQuery {
+    pub id: String,
+    pub name: String,
+    pub conn: String,
+    pub sql: String,
 }
 
 fn version() -> u32 {
@@ -26,7 +38,7 @@ fn version() -> u32 {
 
 impl Default for Workspace {
     fn default() -> Self {
-        Workspace { version: VERSION, environments: default_environments(), connections: Vec::new() }
+        Workspace { version: VERSION, environments: default_environments(), connections: Vec::new(), saved_queries: Vec::new() }
     }
 }
 
@@ -84,6 +96,7 @@ mod tests {
         }
         let back = load(&path).unwrap();
         assert_eq!(back.connections[0].id, "acme-db");
+        assert!(back.saved_queries.is_empty(), "a file from before saved queries has none");
         assert_eq!((back.version, back.environments.len()), (VERSION, 3), "a version 1 file gets the default environments");
         let mut json: serde_json::Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
         json["environments"] = serde_json::json!([]);

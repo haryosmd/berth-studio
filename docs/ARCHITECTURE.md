@@ -108,8 +108,8 @@ A confirmed write runs on a one-off session that is closed afterwards. Every oth
 - **Statement timeout:** every session sets `statement_timeout` (30 s by default).
 - **Cancelling:** a running query is cancelled through the server's cancel protocol. `cancel_query` looks the query up by its run id.
 - **Result size:** a result keeps at most 5,000 rows and is marked `truncated` beyond that, so one careless `SELECT *` cannot exhaust memory.
-- **Values as text:** values travel as text through the simple query protocol. Types for table browsing come from the catalog.
-- **Table browsing:** the schema and table are first confirmed in `pg_catalog`, and only then quoted into SQL. Limit and offset are integers.
+- **Values as text:** values travel as text. The query editor uses the simple query protocol; the table browser selects every column as `::text`, so the grid sees the same strings. Types for table browsing come from the catalog.
+- **Table browsing:** the schema, table and every column named by a filter or sort are first confirmed in `pg_catalog`, and only then quoted into SQL. Limit and offset are integers. Browsing always runs as one prepared statement (the extended protocol), so a request can never add a second statement; the session is read-only besides. Filter values are bound as `$n::text` and cast server-side to the column's catalog type, as in `"users"."id" = ($1::text)::integer`, which keeps indexes usable and turns a bad value into a plain server error. A free-text `WHERE` condition is one parenthesised expression; `;` is refused up front, and an error position inside it is reported in the user's own text. Columns are qualified with the table, because the select list aliases each one to its own name as text and a bare name in `ORDER BY` would pick that alias.
 - **TLS:** TLS uses rustls with the macOS trust store, and the certificate host name is checked too. `auto` means required for every host except `localhost`. An endpoint can add a PEM file of CA certificates to that store, which RDS needs. There is no OpenSSL in the dependency tree.
 
 Sessions are cached per connection, environment, role and read-only flag. Saving a connection drops its cached sessions.
@@ -124,7 +124,7 @@ Sessions are cached per connection, environment, role and read-only flag. Saving
 
 ## IPC surface
 
-The webview can call exactly the commands below. Each one is listed in `apps/desktop/src-tauri/build.rs` and allowed in `apps/desktop/src-tauri/capabilities/main.json`; anything else is rejected by Tauri. There is no shell, file system or HTTP plugin.
+The webview can call exactly the commands below. Each one is listed in `apps/desktop/src-tauri/build.rs` and allowed in `apps/desktop/src-tauri/capabilities/main.json`; anything else is rejected by Tauri. There is no shell, file system or HTTP plugin, and the webview never names a path.
 
 | Command | What it does |
 |---|---|
@@ -135,20 +135,30 @@ The webview can call exactly the commands below. Each one is listed in `apps/des
 | `delete_connection` | Removes a connection and its Keychain items |
 | `test_profile` | Connects read-only to every endpoint of a draft profile and reports the server version or the error |
 | `list_tables` | Tables, views and materialised views the user can read |
-| `browse_table` | One page of a table, ordered by its primary key |
+| `browse_table` | One page of a table: filter chips, an optional `WHERE` condition, a sort, limit and offset, all bound as parameters |
+| `describe_table` | A table's columns and its foreign keys, outgoing and incoming, from `pg_constraint` |
+| `table_structure` | A table's columns (nullability, defaults, identity, generated), indexes, constraints and comments, plus DDL built from them |
+| `schema_columns` | Every column of every readable table, at most 20,000, for SQL completion |
+| `count_rows` | How many rows a browse request matches: exact when it filters, the planner's estimate otherwise |
 | `run_query` | Routes, guards production, runs, and reports where the query ran |
 | `cancel_query` | Cancels a running query by its run id |
+| `list_saved_queries` | The saved queries in the workspace |
+| `save_query` | Saves a new query, or replaces one by id, for an existing connection |
+| `delete_saved_query` | Removes a saved query |
+| `list_history` | Recent runs from the local history, newest first, narrowed by connection and text |
+| `clear_history` | Forgets one connection's history, or all of it |
 | `mongo_overview` | MongoDB server version, topology and the databases the user can read |
 | `list_collections` | Collections, views and time-series collections, with estimated counts |
 | `find_documents` | Filter, sort, projection, skip and limit on one collection |
 | `aggregate` | Runs a pipeline; one that writes follows the production and read-only rules |
 | `list_indexes` | Index names, keys and uniqueness |
 | `write_document` | Inserts, replaces or deletes one document by `_id`, behind the same guards |
+| `save_export` | Shows the native Save dialog for a CSV or JSON export and writes the file where the user chose |
 | `check_update` | Asks the latest GitHub release whether a newer version exists |
 | `install_update` | Downloads, verifies and installs that version, streaming progress over a channel |
 | `restart_app` | Restarts into the installed update |
 
-The updater plugin is registered for its Rust API only. Its own commands are not in the capability file, so the webview cannot call them.
+The updater and dialog plugins are registered for their Rust APIs only. Their own commands are not in the capability file, so the webview cannot call them.
 
 The webview runs under a strict Content Security Policy, set in `tauri.conf.json`:
 - scripts only from the app bundle;

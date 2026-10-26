@@ -8,13 +8,17 @@
 //! - PostgreSQL sessions on read endpoints and read-only profiles are read-only at the server;
 //!   MongoDB sessions for read-only profiles refuse writes before anything is sent.
 
-use crate::workspace::{self, Workspace};
+use crate::history::{self, History};
+use crate::workspace::{self, SavedQuery, Workspace};
 use berth_core::{
     check_prod_write, profile::validate_connection_id, route, validate_environments, Connection, Endpoint, Engine, EnvId, Environment,
     Kind, Profile, Role, RouteMode, RouteOptions,
 };
 use berth_mongo::{CollectionInfo, Documents, FindRequest, MongoError, ServerInfo};
-use berth_postgres::{Canceller, DbError, ResultSet, Session, Table, Target};
+use berth_postgres::{
+    build_updates, preview_text, BrowseRequest, Canceller, DbError, EditPlan, EditPreview, ResultSet, RowCount, SchemaColumn, Session,
+    Table, TableInfo, TableStructure, Target,
+};
 use berth_secrets::{account, account_of, reference, SecretStore};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -32,6 +36,15 @@ pub struct PasswordInput {
     /// Position among the profile's endpoints with the same role.
     pub index: usize,
     pub password: String,
+}
+
+/// What a commit from the grid changed.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EditOutcome {
+    pub rows: u64,
+    pub host: String,
+    pub elapsed_ms: u64,
 }
 
 #[derive(Debug, Serialize)]
@@ -98,6 +111,7 @@ pub struct App {
     sessions: Mutex<HashMap<SessionKey, Arc<Session>>>,
     mongo: Mutex<HashMap<MongoKey, berth_mongo::Session>>,
     running: std::sync::Mutex<HashMap<String, Canceller>>,
+    history: std::sync::Mutex<History>,
 }
 
 fn err(msg: impl Into<String>) -> DbError {
@@ -121,6 +135,11 @@ pub const NO_WRITE: &str = "BERTH_NO_WRITE";
 
 /// The largest SQL text accepted over IPC.
 const MAX_SQL_BYTES: usize = 1 << 20;
+const MAX_QUERY_NAME: usize = 120;
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64)
+}
 
 /// True when two endpoints reach the same server as the same user.
 fn same_server(a: &Endpoint, b: &Endpoint) -> bool {
@@ -144,8 +163,10 @@ fn label(e: &Endpoint) -> String {
 }
 
 impl App {
+    /// `path` is the workspace file; the query history lives beside it.
     pub fn new(path: PathBuf, secrets: Box<dyn SecretStore>) -> Result<App, String> {
         let ws = workspace::load(&path)?;
+        let history = History::load(path.with_file_name("history.jsonl"));
         Ok(App {
             path,
             ws: Mutex::new(ws),
@@ -153,6 +174,7 @@ impl App {
             sessions: Mutex::new(HashMap::new()),
             mongo: Mutex::new(HashMap::new()),
             running: Default::default(),
+            history: std::sync::Mutex::new(history),
         })
     }
 
@@ -323,6 +345,67 @@ impl App {
         Ok(())
     }
 
+    // ------------------------------------------------------------------ saved queries and history
+
+    pub async fn saved_queries(&self) -> Vec<SavedQuery> {
+        self.ws.lock().await.saved_queries.clone()
+    }
+
+    /// Saves a new query (empty `id`) or replaces an existing one. Returns it with its id.
+    pub async fn save_query(&self, mut q: SavedQuery) -> Result<SavedQuery, DbError> {
+        q.name = q.name.trim().to_string();
+        if q.name.is_empty() || q.name.chars().count() > MAX_QUERY_NAME {
+            return Err(err(format!("A saved query needs a name of 1 to {MAX_QUERY_NAME} characters.")));
+        }
+        if q.sql.len() > MAX_SQL_BYTES {
+            return Err(err(format!("A saved query can be at most {} MiB.", MAX_SQL_BYTES >> 20)));
+        }
+        let mut ws = self.ws.lock().await;
+        if !ws.connections.iter().any(|c| c.id == q.conn) {
+            return Err(err(format!("{} does not exist.", q.conn)));
+        }
+        if q.id.is_empty() {
+            let mut n = now_ms();
+            while ws.saved_queries.iter().any(|x| x.id == format!("q{n}")) {
+                n += 1;
+            }
+            q.id = format!("q{n}");
+        } else if !ws.saved_queries.iter().any(|x| x.id == q.id) {
+            return Err(err("This saved query was deleted. Save it again as a new one."));
+        }
+        ws.saved_queries.retain(|x| x.id != q.id);
+        ws.saved_queries.push(q.clone());
+        ws.saved_queries.sort_by_key(|x| x.name.to_lowercase());
+        workspace::save(&self.path, &ws).map_err(err)?;
+        Ok(q)
+    }
+
+    pub async fn delete_saved_query(&self, id: &str) -> Result<(), DbError> {
+        let mut ws = self.ws.lock().await;
+        ws.saved_queries.retain(|x| x.id != id);
+        workspace::save(&self.path, &ws).map_err(err)
+    }
+
+    pub fn history(&self, conn: Option<&str>, query: Option<&str>, limit: usize) -> Result<Vec<history::Entry>, DbError> {
+        Ok(self.history.lock().map_err(|_| err("internal lock"))?.list(conn, query, limit))
+    }
+
+    pub fn clear_history(&self, conn: Option<&str>) -> Result<(), DbError> {
+        self.history.lock().map_err(|_| err("internal lock"))?.clear(conn).map_err(err)
+    }
+
+    /// Adds a run to the history, with its row count or error taken from `out`. The history is a
+    /// convenience: failing to write it never fails the query.
+    fn remember(&self, mut entry: history::Entry, out: &Result<Vec<ResultSet>, DbError>) {
+        entry.rows = out
+            .as_ref()
+            .map_or(0, |sets| sets.iter().map(|s| if s.columns.is_empty() { s.affected.unwrap_or(0) } else { s.rows.len() as u64 }).sum());
+        entry.error = out.as_ref().err().map(|e| e.message.clone());
+        if let Ok(mut h) = self.history.lock() {
+            let _ = h.record(entry);
+        }
+    }
+
     /// Connects read-only to every endpoint of a draft profile and reports each one.
     pub async fn test_profile(
         &self,
@@ -408,11 +491,73 @@ impl App {
         self.reader(id, env).await?.0.list_tables().await
     }
 
-    pub async fn browse_table(&self, id: &str, env: &EnvId, schema: &str, table: &str, limit: u32, offset: u64) -> Result<Page, DbError> {
+    pub async fn browse_table(&self, id: &str, env: &EnvId, schema: &str, table: &str, request: &BrowseRequest) -> Result<Page, DbError> {
         let (s, host) = self.reader(id, env).await?;
         let t = Instant::now();
-        let set = s.browse(schema, table, limit, offset).await?;
+        let set = s.browse(schema, table, request).await?;
         Ok(Page { set, host, elapsed_ms: t.elapsed().as_millis() as u64 })
+    }
+
+    pub async fn describe_table(&self, id: &str, env: &EnvId, schema: &str, table: &str) -> Result<TableInfo, DbError> {
+        self.reader(id, env).await?.0.describe(schema, table).await
+    }
+
+    pub async fn table_structure(&self, id: &str, env: &EnvId, schema: &str, table: &str) -> Result<TableStructure, DbError> {
+        self.reader(id, env).await?.0.structure(schema, table).await
+    }
+
+    pub async fn schema_columns(&self, id: &str, env: &EnvId) -> Result<Vec<SchemaColumn>, DbError> {
+        self.reader(id, env).await?.0.schema_columns().await
+    }
+
+    /// Decides whether a write from the grid may run, and opens a session of its own on the
+    /// primary for it: never cached, so a transaction can never be left open on a session the
+    /// browser shares, and the next production write asks for the name again.
+    async fn pg_writer(&self, id: &str, env: &EnvId, confirm: Option<&str>) -> Result<(Session, String), DbError> {
+        let (_, p, environment) = self.profile(id, env, Engine::Postgres).await?;
+        let e = p
+            .endpoints(Role::Write)
+            .next()
+            .ok_or_else(|| coded(NO_WRITE, format!("The {env} profile of {id} has no write endpoint, so it can only read.")))?;
+        if environment.production {
+            check_prod_write(&environment, Kind::Write, id, confirm).map_err(|m| coded(CONFIRM_CODE, m))?;
+        } else if p.read_only {
+            return Err(coded(NO_WRITE, format!("The {env} profile of {id} opens read-only.")));
+        }
+        let pw = self.password_for(e)?;
+        let s = Session::connect(&Target::new(e.clone(), false), pw.as_ref().map(|x| x.as_str())).await?;
+        Ok((s, e.host.clone()))
+    }
+
+    /// The SQL a plan would run, for review. Needs no write access: it only reads the catalog.
+    pub async fn preview_edits(&self, id: &str, env: &EnvId, schema: &str, table: &str, plan: &EditPlan) -> Result<EditPreview, DbError> {
+        let (s, _) = self.reader(id, env).await?;
+        let columns = s.columns(schema, table).await?;
+        let statements = build_updates(schema, table, &columns, plan)?;
+        let text = preview_text(schema, table, &statements, plan);
+        Ok(EditPreview { statements, text })
+    }
+
+    pub async fn commit_edits(
+        &self,
+        id: &str,
+        env: &EnvId,
+        schema: &str,
+        table: &str,
+        plan: &EditPlan,
+        confirm: Option<&str>,
+    ) -> Result<EditOutcome, DbError> {
+        let (s, host) = self.pg_writer(id, env, confirm).await?;
+        // The catalog is read again on the write session: columns may have changed since the page loaded.
+        let columns = s.columns(schema, table).await?;
+        let statements = build_updates(schema, table, &columns, plan)?;
+        let t = Instant::now();
+        let rows = s.apply_edits(&statements).await?;
+        Ok(EditOutcome { rows, host, elapsed_ms: t.elapsed().as_millis() as u64 })
+    }
+
+    pub async fn count_rows(&self, id: &str, env: &EnvId, schema: &str, table: &str, request: &BrowseRequest) -> Result<RowCount, DbError> {
+        self.reader(id, env).await?.0.count(schema, table, request).await
     }
 
     pub async fn run_query(
@@ -464,16 +609,23 @@ impl App {
         self.running.lock().map_err(|_| err("internal lock"))?.insert(run_id.to_string(), session.canceller());
         let t = Instant::now();
         let out = session.run(sql).await;
+        let elapsed_ms = t.elapsed().as_millis() as u64;
         self.running.lock().map_err(|_| err("internal lock"))?.remove(run_id);
-        Ok(RunResult {
-            results: out?,
-            role: r.role,
-            reason: r.reason,
-            warn: r.warn,
-            host: e.host,
-            read_only,
-            elapsed_ms: t.elapsed().as_millis() as u64,
-        })
+        if history::recordable(sql) {
+            let entry = history::Entry {
+                at: now_ms(),
+                conn: c.id.clone(),
+                env: env.clone(),
+                role: r.role,
+                host: e.host.clone(),
+                sql: sql.into(),
+                elapsed_ms,
+                rows: 0,
+                error: None,
+            };
+            self.remember(entry, &out);
+        }
+        Ok(RunResult { results: out?, role: r.role, reason: r.reason, warn: r.warn, host: e.host, read_only, elapsed_ms })
     }
 
     pub async fn cancel_query(&self, run_id: &str) -> Result<bool, DbError> {
@@ -611,6 +763,7 @@ fn mongo_target(e: &Endpoint, p: &Profile, read_only: bool) -> berth_mongo::Targ
 mod tests {
     use super::*;
     use berth_core::{default_environments, ReadPreference, TlsMode};
+    use berth_postgres::{CellEdit, Filter, FilterOp, RowEdit};
     use berth_secrets::MemoryStore;
     use std::collections::BTreeMap;
 
@@ -690,6 +843,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("workspace.json");
         let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(dir.join("history.jsonl"));
         (App::new(path.clone(), Box::new(MemoryStore::default())).unwrap(), dir)
     }
 
@@ -783,6 +937,49 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn saved_queries_live_in_the_workspace_and_history_beside_it() {
+        let (a, dir) = app("queries");
+        let q =
+            |id: &str, name: &str, conn: &str| SavedQuery { id: id.into(), name: name.into(), conn: conn.into(), sql: "SELECT 1".into() };
+        assert!(a.save_query(q("", "  ", "acme-db")).await.is_err(), "a name is required");
+        assert!(a.save_query(q("", "orders", "acme-db")).await.unwrap_err().message.contains("does not exist"));
+        a.save_connection(conn(), passwords()).await.unwrap();
+        let saved = a.save_query(q("", " revenue ", "acme-db")).await.unwrap();
+        assert!(saved.id.starts_with('q') && saved.name == "revenue");
+        let renamed = a.save_query(SavedQuery { name: "Revenue by plan".into(), ..saved.clone() }).await.unwrap();
+        assert_eq!(renamed.id, saved.id);
+        a.save_query(q("", "active users", "acme-db")).await.unwrap();
+        assert!(a.save_query(q("q-gone", "x", "acme-db")).await.is_err(), "an unknown id is not silently created");
+
+        a.history
+            .lock()
+            .unwrap()
+            .record(history::Entry {
+                at: 1,
+                conn: "acme-db".into(),
+                env: id("dev"),
+                role: Role::Read,
+                host: "localhost".into(),
+                sql: "SELECT 1".into(),
+                elapsed_ms: 2,
+                rows: 1,
+                error: None,
+            })
+            .unwrap();
+        let reopened = App::new(dir.join("workspace.json"), Box::new(MemoryStore::default())).unwrap();
+        let names: Vec<_> = reopened.saved_queries().await.into_iter().map(|q| q.name).collect();
+        assert_eq!(names, ["active users", "Revenue by plan"]);
+        assert_eq!(reopened.history(Some("acme-db"), None, 10).unwrap().len(), 1);
+        let text = std::fs::read_to_string(dir.join("workspace.json")).unwrap();
+        assert!(text.contains("Revenue by plan") && !text.contains("elapsedMs"), "history never lands in the workspace file");
+        reopened.delete_saved_query(&saved.id).await.unwrap();
+        reopened.clear_history(None).unwrap();
+        assert_eq!(reopened.saved_queries().await.len(), 1);
+        assert!(reopened.history(None, None, 10).unwrap().is_empty());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
     async fn a_read_only_profile_refuses_writes_before_connecting() {
         let (a, dir) = app("readonly");
         let mut c = conn();
@@ -826,8 +1023,56 @@ mod tests {
 
         let tables = a.list_tables("acme-db", &dev).await.unwrap();
         assert!(tables.iter().any(|t| t.name == "orders"));
-        let page = a.browse_table("acme-db", &dev, "public", "orders", 100, 0).await.unwrap();
+        let info = a.describe_table("acme-db", &dev, "public", "orders").await.unwrap();
+        assert!(a.table_structure("acme-db", &dev, "public", "orders").await.unwrap().ddl.contains("CREATE TABLE \"public\".\"orders\""));
+        assert!(a.schema_columns("acme-db", &dev).await.unwrap().iter().any(|c| c.table == "orders" && c.column == "status"));
+        assert_eq!((info.foreign_keys[0].ref_table.as_str(), info.referenced_by.len()), ("users", 0));
+        let page = a
+            .browse_table("acme-db", &dev, "public", "orders", &BrowseRequest { limit: 100, offset: 0, ..Default::default() })
+            .await
+            .unwrap();
         assert_eq!(page.set.rows.len(), 100);
+        let filtered = BrowseRequest {
+            filters: vec![Filter { column: "status".into(), op: FilterOp::Eq, value: Some("paid".into()), values: vec![] }],
+            limit: 10,
+            offset: 0,
+            ..Default::default()
+        };
+        let n = a.count_rows("acme-db", &dev, "public", "orders", &filtered).await.unwrap();
+        assert!(n.exact && n.total.is_some_and(|t| t > 0), "{n:?}");
+        let page = a.browse_table("acme-db", &dev, "public", "orders", &filtered).await.unwrap();
+        assert!(page.set.rows.iter().all(|r| r[2].as_deref() == Some("paid")));
+
+        // Grid edits: dev commits on the primary; prod needs the typed name; a read-only profile is refused.
+        let cell = |column: &str, value: Option<&str>| CellEdit { column: column.into(), value: value.map(str::to_string) };
+        let plan = EditPlan { rows: vec![RowEdit { key: vec![cell("id", Some("5"))], set: vec![cell("plan", Some("team"))] }] };
+        let preview = a.preview_edits("acme-db", &dev, "public", "users", &plan).await.unwrap();
+        assert!(
+            preview.text.contains("UPDATE \"public\".\"users\" SET \"plan\" = ($1::text)::text WHERE \"id\" = ($2::text)::integer"),
+            "{}",
+            preview.text
+        );
+        let done = a.commit_edits("acme-db", &dev, "public", "users", &plan, None).await.unwrap();
+        assert_eq!(done.rows, 1);
+        let r = a.run_query("acme-db", &dev, "SELECT plan FROM users WHERE id = 5", RouteMode::Write, None, "r8").await.unwrap();
+        assert_eq!(r.results[0].rows[0][0].as_deref(), Some("team"));
+        assert_eq!(a.commit_edits("acme-db", &prod, "public", "users", &plan, None).await.unwrap_err().code.as_deref(), Some(CONFIRM_CODE));
+        assert!(a.commit_edits("acme-db", &prod, "public", "users", &plan, Some("acme")).await.is_err());
+        let restore = EditPlan { rows: vec![RowEdit { key: vec![cell("id", Some("5"))], set: vec![cell("plan", Some("starter"))] }] };
+        assert_eq!(a.commit_edits("acme-db", &prod, "public", "users", &restore, Some("acme-db")).await.unwrap().rows, 1);
+        // The cached browse session is still read-only after all that.
+        let e = a.run_query("acme-db", &dev, "UPDATE users SET plan = plan WHERE id = 5", RouteMode::Read, None, "r9").await.unwrap_err();
+        assert_eq!(e.code.as_deref(), Some("25006"));
+        let mut ro = conn();
+        ro.id = "ro-db".into();
+        ro.profiles.get_mut(&dev).unwrap().read_only = true;
+        a.save_connection(
+            ro,
+            passwords().into_iter().map(|p| PasswordInput { env: p.env, role: p.role, index: p.index, password: p.password }).collect(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(a.commit_edits("ro-db", &dev, "public", "users", &plan, None).await.unwrap_err().code.as_deref(), Some(NO_WRITE));
 
         let checks = a.test_profile("acme-db", Engine::Postgres, &dev, conn().profiles[&dev].clone(), vec![]).await.unwrap();
         assert!(checks.iter().all(|c| c.ok), "{checks:?}");

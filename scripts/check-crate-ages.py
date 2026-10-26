@@ -24,6 +24,10 @@ UA = {"User-Agent": "berth-studio supply-chain check (https://github.com/berth-s
 # Keep the advisory id next to each entry, and remove the entry once the version is a week old.
 SECURITY_FIXES = {
     ("rustls", "0.23.46"): "RUSTSEC-2026-0346, RUSTSEC-2026-0347",
+    ("rustls-webpki", "0.103.16"): "RUSTSEC-2026-0382 (distrusted eMudhra intermediates)",
+    ("webpki-roots", "1.0.10"): "RUSTSEC-2026-0381 (distrusted eMudhra intermediates)",
+    ("webpki-root-certs", "1.0.10"): "RUSTSEC-2026-0383 (distrusted eMudhra intermediates)",
+    ("ctutils", "0.4.4"): "RUSTSEC-2026-0385",
 }
 
 

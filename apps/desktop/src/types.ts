@@ -70,6 +70,63 @@ export interface Column {
   name: string;
   typeName?: string;
   primaryKey: boolean;
+  /** Set by the interface when the column is part of a foreign key: the column it points at. */
+  fk?: { schema: string; table: string; column: string };
+}
+
+/** One foreign key: `table.columns` point at `refTable.refColumns`, in matching order. */
+export interface ForeignKey {
+  name: string;
+  schema: string;
+  table: string;
+  columns: string[];
+  refSchema: string;
+  refTable: string;
+  refColumns: string[];
+}
+
+/** One column of every table the session can read, for SQL autocomplete. */
+export interface SchemaColumn { schema: string; table: string; column: string; typeName: string }
+
+/** What `table_structure` reads from the catalog (crates/berth-postgres/src/structure.rs). */
+export interface StructureColumn {
+  name: string;
+  typeName: string;
+  nullable: boolean;
+  default: string | null;
+  identity: string | null;
+  generated: string | null;
+  comment: string | null;
+  primaryKey: boolean;
+}
+export interface TableIndex {
+  name: string;
+  method: string;
+  columns: string;
+  definition: string;
+  primary: boolean;
+  unique: boolean;
+  constraint: string | null;
+  sizeBytes: number;
+}
+export interface TableConstraint { name: string; kind: string; definition: string }
+export interface TableStructure {
+  schema: string;
+  name: string;
+  kind: string;
+  comment: string | null;
+  columns: StructureColumn[];
+  indexes: TableIndex[];
+  constraints: TableConstraint[];
+  partitionKey: string | null;
+  viewDefinition: string | null;
+  ddl: string;
+}
+
+export interface TableInfo {
+  columns: Column[];
+  foreignKeys: ForeignKey[];
+  referencedBy: ForeignKey[];
 }
 
 export interface ResultSet {
@@ -84,6 +141,46 @@ export interface Page extends ResultSet {
   elapsedMs: number;
 }
 
+/** How a filter chip compares its column with its value; the Rust side binds the value as a parameter. */
+export type FilterOp = 'eq' | 'ne' | 'lt' | 'le' | 'gt' | 'ge' | 'contains' | 'startsWith' | 'isNull' | 'isNotNull' | 'in';
+
+export interface Filter {
+  column: string;
+  op: FilterOp;
+  value?: string;
+  /** For `in` only. */
+  values?: string[];
+}
+
+export interface Sort {
+  column: string;
+  descending: boolean;
+}
+
+export interface BrowseRequest {
+  filters: Filter[];
+  /** A raw SQL condition, appended as `AND (…)`; one expression, never a second statement. */
+  where: string | null;
+  sort: Sort | null;
+  limit: number;
+  offset: number;
+}
+
+/** One cell of an edit; `null` is SQL NULL. */
+export interface CellEdit { column: string; value: string | null }
+/** One row's edits: `key` is every primary-key column with the value the row had when it was read. */
+export interface RowEdit { key: CellEdit[]; set: CellEdit[] }
+export interface EditPlan { rows: RowEdit[] }
+export interface Statement { sql: string; params: (string | null)[] }
+export interface EditPreview { statements: Statement[]; text: string }
+export interface EditOutcome { rows: number; host: string; elapsedMs: number }
+
+/** Exact when the request filters, otherwise the planner's estimate (`null` for views and unanalysed tables). */
+export interface RowCount {
+  total: number | null;
+  exact: boolean;
+}
+
 export interface RunResult {
   results: ResultSet[];
   role: Role;
@@ -92,6 +189,22 @@ export interface RunResult {
   host: string;
   readOnly: boolean;
   elapsedMs: number;
+}
+
+/** A query kept by name in the workspace, for one connection. An empty id asks the Rust side for a new one. */
+export interface SavedQuery { id: string; name: string; conn: string; sql: string }
+
+/** One run from the local query history (src-tauri/src/history.rs). `at` is Unix time in milliseconds. */
+export interface HistoryEntry {
+  at: number;
+  conn: string;
+  env: EnvId;
+  role: Role;
+  host: string;
+  sql: string;
+  elapsedMs: number;
+  rows: number;
+  error?: string;
 }
 
 export interface EndpointCheck {

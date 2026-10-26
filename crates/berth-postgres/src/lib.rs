@@ -5,10 +5,14 @@
 //! (`default_transaction_read_only`), so the database itself refuses a stray write.
 //! Values travel as text (the simple query protocol), which is all the grid needs to show them.
 
+mod structure;
+
 use berth_core::{Endpoint, TlsMode};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
+pub use structure::{build_ddl, Constraint, Index, SchemaColumn, StructureColumn, TableStructure, MAX_SCHEMA_COLUMNS};
+use tokio_postgres::types::ToSql;
 use tokio_postgres::{CancelToken, Client, NoTls, SimpleQueryMessage};
 
 /// Rows kept per result. A larger result is cut and marked `truncated`, so one careless
@@ -299,6 +303,28 @@ pub struct Column {
     pub primary_key: bool,
 }
 
+/// One foreign key: `table.columns` point at `ref_table.ref_columns`, in matching order.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ForeignKey {
+    pub name: String,
+    pub schema: String,
+    pub table: String,
+    pub columns: Vec<String>,
+    pub ref_schema: String,
+    pub ref_table: String,
+    pub ref_columns: Vec<String>,
+}
+
+/// A table's columns and the foreign keys it holds and receives.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TableInfo {
+    pub columns: Vec<Column>,
+    pub foreign_keys: Vec<ForeignKey>,
+    pub referenced_by: Vec<ForeignKey>,
+}
+
 #[derive(Debug, Clone, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ResultSet {
@@ -415,17 +441,85 @@ impl Session {
         Ok(rows.iter().map(|r| Column { name: r.get(0), type_name: Some(r.get(1)), primary_key: r.get(2) }).collect())
     }
 
-    /// One page of a table, ordered by its primary key when it has one.
-    pub async fn browse(&self, schema: &str, table: &str, limit: u32, offset: u64) -> Result<ResultSet, DbError> {
+    /// The table's columns plus its foreign keys, outgoing and incoming, from `pg_constraint`.
+    pub async fn describe(&self, schema: &str, table: &str) -> Result<TableInfo, DbError> {
         let columns = self.columns(schema, table).await?;
-        let pk: Vec<String> = columns.iter().filter(|c| c.primary_key).map(|c| quote_ident(&c.name)).collect();
-        let order = if pk.is_empty() { String::new() } else { format!(" ORDER BY {}", pk.join(", ")) };
-        let limit = limit.clamp(1, MAX_ROWS as u32);
-        let sql = format!("SELECT * FROM {}.{}{order} LIMIT {limit} OFFSET {offset}", quote_ident(schema), quote_ident(table));
-        let mut sets = run_simple(&self.client, &sql).await?;
-        let mut set = sets.pop().unwrap_or_default();
-        set.columns = columns;
-        Ok(set)
+        let fetch = |filter: &'static str| async move {
+            let rows = self
+                .client
+                .query(
+                    &format!("{FK_SQL} WHERE con.contype = 'f' AND {filter} ORDER BY con.conname, n.nspname, c.relname, k.ord"),
+                    &[&schema, &table],
+                )
+                .await?;
+            Ok::<_, DbError>(fold_foreign_keys(rows.iter().map(|r| (r.get(0), r.get(1), r.get(2), r.get(3), r.get(4), r.get(5), r.get(6)))))
+        };
+        let foreign_keys = fetch("n.nspname = $1 AND c.relname = $2").await?;
+        let referenced_by = fetch("fn.nspname = $1 AND fc.relname = $2").await?;
+        Ok(TableInfo { columns, foreign_keys, referenced_by })
+    }
+
+    /// One page of a table: filtered, sorted (by the primary key unless asked otherwise) and cut
+    /// to `limit` rows from `offset`. Runs as one prepared statement with every value bound, so
+    /// the request can never add a second statement; see [`build_browse`].
+    pub async fn browse(&self, schema: &str, table: &str, req: &BrowseRequest) -> Result<ResultSet, DbError> {
+        let columns = self.columns(schema, table).await?;
+        let b = build_browse(schema, table, &columns, req)?;
+        let rows = self.client.query(&b.sql, &b.param_refs()).await.map_err(|e| rebase_position(e.into(), b.raw_start))?;
+        let rows: Vec<Vec<Option<String>>> =
+            rows.iter().map(|r| (0..columns.len()).map(|i| r.get::<_, Option<String>>(i)).collect()).collect();
+        let affected = Some(rows.len() as u64);
+        Ok(ResultSet { columns, rows, truncated: false, affected })
+    }
+
+    /// How many rows the request matches: exact when it filters, otherwise the planner's
+    /// estimate for the whole table (`None` when the table was never analysed, or is a view).
+    pub async fn count(&self, schema: &str, table: &str, req: &BrowseRequest) -> Result<RowCount, DbError> {
+        let columns = self.columns(schema, table).await?;
+        let b = build_browse(schema, table, &columns, req)?;
+        if b.filtered {
+            let row = self.client.query_one(&b.count_sql, &b.param_refs()).await.map_err(|e| rebase_position(e.into(), b.raw_start))?;
+            return Ok(RowCount { total: Some(row.get(0)), exact: true });
+        }
+        let row = self
+            .client
+            .query_opt(
+                "SELECT c.reltuples::bigint, c.relkind::text
+                   FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+                  WHERE n.nspname = $1 AND c.relname = $2",
+                &[&schema, &table],
+            )
+            .await?;
+        let total = row.and_then(|r| {
+            let (n, kind): (i64, String) = (r.get(0), r.get(1));
+            (n >= 0 && matches!(kind.as_str(), "r" | "p" | "m")).then_some(n)
+        });
+        Ok(RowCount { total, exact: false })
+    }
+
+    /// Runs the statements of a commit in one transaction. Each must change exactly one row, or
+    /// the whole transaction is rolled back and nothing is changed. Meant for a session of its
+    /// own: a failure mid-way can never leave a shared session inside a transaction.
+    pub async fn apply_edits(&self, statements: &[Statement]) -> Result<u64, DbError> {
+        self.client.batch_execute("BEGIN").await?;
+        let mut total = 0;
+        for (i, st) in statements.iter().enumerate() {
+            let refs: Vec<&(dyn ToSql + Sync)> = st.params.iter().map(|p| p as &(dyn ToSql + Sync)).collect();
+            let n = match self.client.execute(&st.sql, &refs).await {
+                Ok(n) => n,
+                Err(e) => {
+                    let _ = self.client.batch_execute("ROLLBACK").await;
+                    return Err(e.into());
+                }
+            };
+            if n != 1 {
+                let _ = self.client.batch_execute("ROLLBACK").await;
+                return Err(DbError::msg(format!("Statement {} matched {n} rows instead of 1; nothing was changed.", i + 1)));
+            }
+            total += n;
+        }
+        self.client.batch_execute("COMMIT").await?;
+        Ok(total)
     }
 
     /// Runs user SQL, which may hold several statements. Returns one result per statement.
@@ -454,6 +548,341 @@ impl Canceller {
 /// Quotes an identifier the way Postgres does: wrap in double quotes and double any inside.
 pub fn quote_ident(name: &str) -> String {
     format!("\"{}\"", name.replace('"', "\"\""))
+}
+
+/// How a filter compares a column with its value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum FilterOp {
+    Eq,
+    Ne,
+    Lt,
+    Le,
+    Gt,
+    Ge,
+    Contains,
+    StartsWith,
+    IsNull,
+    IsNotNull,
+    In,
+}
+
+/// One filter chip. `value` serves every operator but `In`, which takes `values`.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Filter {
+    pub column: String,
+    pub op: FilterOp,
+    #[serde(default)]
+    pub value: Option<String>,
+    #[serde(default)]
+    pub values: Vec<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Sort {
+    pub column: String,
+    #[serde(default)]
+    pub descending: bool,
+}
+
+/// What the table browser asks for: chips, an optional free-text condition, a sort and a page.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BrowseRequest {
+    #[serde(default)]
+    pub filters: Vec<Filter>,
+    /// A raw SQL condition, appended as `AND (…)`. It can only ever be part of this one
+    /// statement: the extended protocol refuses a second one, and `;` is rejected up front.
+    #[serde(default, rename = "where")]
+    pub where_: Option<String>,
+    #[serde(default)]
+    pub sort: Option<Sort>,
+    pub limit: u32,
+    pub offset: u64,
+}
+
+/// One cell of an edit: the column and its new text, `None` for SQL NULL.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CellEdit {
+    pub column: String,
+    pub value: Option<String>,
+}
+
+/// One row's edits. `key` holds every primary-key column with the value the row had when it was
+/// read, so the UPDATE finds exactly that row.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RowEdit {
+    pub key: Vec<CellEdit>,
+    pub set: Vec<CellEdit>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EditPlan {
+    pub rows: Vec<RowEdit>,
+}
+
+/// One UPDATE with its bound values; `None` binds SQL NULL.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Statement {
+    pub sql: String,
+    pub params: Vec<Option<String>>,
+}
+
+/// The statements a plan would run, and the same as text for the user to read before committing.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EditPreview {
+    pub statements: Vec<Statement>,
+    pub text: String,
+}
+
+/// The most rows one commit may change.
+pub const MAX_EDIT_ROWS: usize = 500;
+
+/// Turns a plan into one UPDATE per row, every value bound and cast to the column's catalog type:
+/// `UPDATE "public"."users" SET "plan" = ($1::text)::text WHERE "id" = ($2::text)::integer`.
+/// Column names must come from the catalog, the key must name every primary-key column, and a
+/// primary-key column cannot be set, so an edit can never move to another row.
+pub fn build_updates(schema: &str, table: &str, columns: &[Column], plan: &EditPlan) -> Result<Vec<Statement>, DbError> {
+    let pk: Vec<&Column> = columns.iter().filter(|c| c.primary_key).collect();
+    if pk.is_empty() {
+        return Err(DbError::msg(format!("{table} has no primary key, so its rows cannot be edited inline.")));
+    }
+    if plan.rows.is_empty() {
+        return Err(DbError::msg("There is nothing to commit."));
+    }
+    if plan.rows.len() > MAX_EDIT_ROWS {
+        return Err(DbError::msg(format!("A commit changes at most {MAX_EDIT_ROWS} rows; this one has {}.", plan.rows.len())));
+    }
+    let find = |name: &str| columns.iter().find(|c| c.name == name).ok_or_else(|| DbError::msg(format!("Unknown column {name}.")));
+    let target = format!("{}.{}", quote_ident(schema), quote_ident(table));
+    let mut out = Vec::with_capacity(plan.rows.len());
+    for (i, row) in plan.rows.iter().enumerate() {
+        let at = |what: &str| DbError::msg(format!("Row {}: {what}", i + 1));
+        let mut params: Vec<Option<String>> = Vec::new();
+        let mut bind = |c: &Column, v: Option<String>| {
+            params.push(v);
+            format!("(${}::text)::{}", params.len(), c.type_name.as_deref().unwrap_or("text"))
+        };
+        if row.set.is_empty() {
+            return Err(at("nothing is set."));
+        }
+        let mut sets = Vec::new();
+        let mut seen: Vec<&str> = Vec::new();
+        for e in &row.set {
+            let c = find(&e.column)?;
+            if c.primary_key {
+                return Err(at(&format!("{} is part of the primary key, which is not editable inline.", c.name)));
+            }
+            if seen.contains(&c.name.as_str()) {
+                return Err(at(&format!("{} is set twice.", c.name)));
+            }
+            seen.push(&c.name);
+            sets.push(format!("{} = {}", quote_ident(&c.name), bind(c, e.value.clone())));
+        }
+        let mut wheres = Vec::new();
+        for c in &pk {
+            let k = row.key.iter().filter(|k| k.column == c.name).collect::<Vec<_>>();
+            let k = match k.as_slice() {
+                [one] => *one,
+                [] => return Err(at(&format!("the key is missing {}.", c.name))),
+                _ => return Err(at(&format!("the key names {} twice.", c.name))),
+            };
+            let Some(v) = &k.value else { return Err(at(&format!("{} is NULL in the key.", c.name))) };
+            wheres.push(format!("{} = {}", quote_ident(&c.name), bind(c, Some(v.clone()))));
+        }
+        out.push(Statement { sql: format!("UPDATE {target} SET {} WHERE {}", sets.join(", "), wheres.join(" AND ")), params });
+    }
+    Ok(out)
+}
+
+/// The statements as the review text: a transaction, each UPDATE under a comment naming its row,
+/// and the bound values after it.
+pub fn preview_text(schema: &str, table: &str, statements: &[Statement], plan: &EditPlan) -> String {
+    let lit = |v: &Option<String>| match v {
+        None => "NULL".to_string(),
+        Some(s) => format!("'{}'", s.replace('\'', "''")),
+    };
+    let mut text = String::from("BEGIN;\n");
+    for (st, row) in statements.iter().zip(&plan.rows) {
+        let key = row.key.iter().map(|k| format!("{} = {}", k.column, lit(&k.value))).collect::<Vec<_>>().join(" and ");
+        text.push_str(&format!("\n-- {schema}.{table} where {key}\n{};\n", st.sql));
+        let values = st.params.iter().enumerate().map(|(i, p)| format!("${} = {}", i + 1, lit(p))).collect::<Vec<_>>().join(", ");
+        text.push_str(&format!("-- {values}\n"));
+    }
+    text.push_str("\nCOMMIT;\n");
+    text
+}
+
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RowCount {
+    pub total: Option<i64>,
+    pub exact: bool,
+}
+
+/// The longest free-text condition accepted, in bytes.
+pub const MAX_WHERE_BYTES: usize = 4096;
+/// The most values one `In` filter may list.
+pub const MAX_IN_VALUES: usize = 200;
+
+/// The statements for one [`BrowseRequest`], with their shared parameters.
+#[derive(Debug)]
+pub(crate) struct Built {
+    pub sql: String,
+    pub count_sql: String,
+    /// Every value, bound as `$n::text` and cast server-side to the column's catalog type.
+    pub params: Vec<String>,
+    /// Characters before the free-text condition in `sql`, so an error position inside it can be
+    /// told in the user's own text.
+    pub raw_start: Option<usize>,
+    pub filtered: bool,
+}
+
+impl Built {
+    fn param_refs(&self) -> Vec<&(dyn ToSql + Sync)> {
+        self.params.iter().map(|p| p as &(dyn ToSql + Sync)).collect()
+    }
+}
+
+/// Builds the page and count statements. Column and type names come from the catalog, never
+/// from the request: a filter may only name a column the catalog listed, and its value is bound
+/// as text and cast to that column's `format_type` name, so `"t"."id" = ($1::text)::integer`.
+/// Columns are qualified with the table because the select list aliases each one to its own
+/// name as text, and a bare name in ORDER BY would pick that text alias.
+pub(crate) fn build_browse(schema: &str, table: &str, columns: &[Column], req: &BrowseRequest) -> Result<Built, DbError> {
+    let find = |name: &str| columns.iter().find(|c| c.name == name).ok_or_else(|| DbError::msg(format!("Unknown column {name}.")));
+    let t = quote_ident(table);
+    let mut params: Vec<String> = Vec::new();
+    let mut preds: Vec<String> = Vec::new();
+    for f in &req.filters {
+        preds.push(predicate(f, &t, find(&f.column)?, &mut params)?);
+    }
+    let from = format!("{}.{t}", quote_ident(schema));
+    let mut raw_start = None;
+    if let Some(raw) = req.where_.as_deref().map(str::trim).filter(|w| !w.is_empty()) {
+        if raw.len() > MAX_WHERE_BYTES {
+            return Err(DbError::msg(format!("The condition is longer than {MAX_WHERE_BYTES} bytes.")));
+        }
+        if berth_core::strip(raw).contains(';') {
+            return Err(DbError::msg("The condition is one expression for WHERE; it cannot hold `;`."));
+        }
+        let head = format!("SELECT {} FROM {from} WHERE ", select_list(columns));
+        let before = if preds.is_empty() { format!("{head}(") } else { format!("{head}{} AND (", preds.join(" AND ")) };
+        raw_start = Some(before.chars().count());
+        preds.push(format!("({raw})"));
+    }
+    let filtered = !preds.is_empty();
+    let where_ = if filtered { format!(" WHERE {}", preds.join(" AND ")) } else { String::new() };
+    let mut order: Vec<String> = Vec::new();
+    if let Some(sort) = &req.sort {
+        let c = find(&sort.column)?;
+        order.push(format!("{t}.{} {} NULLS LAST", quote_ident(&c.name), if sort.descending { "DESC" } else { "ASC" }));
+    }
+    for c in columns.iter().filter(|c| c.primary_key && req.sort.as_ref().is_none_or(|s| s.column != c.name)) {
+        order.push(format!("{t}.{}", quote_ident(&c.name)));
+    }
+    let order = if order.is_empty() { String::new() } else { format!(" ORDER BY {}", order.join(", ")) };
+    let limit = req.limit.clamp(1, MAX_ROWS as u32);
+    let sql = format!("SELECT {} FROM {from}{where_}{order} LIMIT {limit} OFFSET {}", select_list(columns), req.offset);
+    let count_sql = format!("SELECT count(*) FROM {from}{where_}");
+    Ok(Built { sql, count_sql, params, raw_start, filtered })
+}
+
+/// One row per column pair of a foreign key: constraint name, referencing schema, table and
+/// column, then the referenced schema, table and column. `unnest … WITH ORDINALITY` keeps the
+/// pairs of a composite key in order.
+const FK_SQL: &str =
+    "SELECT con.conname::text, n.nspname::text, c.relname::text, att.attname::text, fn.nspname::text, fc.relname::text, fatt.attname::text
+   FROM pg_catalog.pg_constraint con
+   JOIN pg_catalog.pg_class c ON c.oid = con.conrelid
+   JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+   JOIN pg_catalog.pg_class fc ON fc.oid = con.confrelid
+   JOIN pg_catalog.pg_namespace fn ON fn.oid = fc.relnamespace
+   JOIN LATERAL unnest(con.conkey, con.confkey) WITH ORDINALITY AS k(a, fa, ord) ON true
+   JOIN pg_catalog.pg_attribute att ON att.attrelid = c.oid AND att.attnum = k.a
+   JOIN pg_catalog.pg_attribute fatt ON fatt.attrelid = fc.oid AND fatt.attnum = k.fa";
+
+type FkRow = (String, String, String, String, String, String, String);
+
+/// Folds consecutive rows of one constraint into a [`ForeignKey`]; rows come sorted by constraint.
+fn fold_foreign_keys(rows: impl IntoIterator<Item = FkRow>) -> Vec<ForeignKey> {
+    let mut out: Vec<ForeignKey> = Vec::new();
+    for (name, schema, table, column, ref_schema, ref_table, ref_column) in rows {
+        match out.last_mut() {
+            Some(fk) if fk.name == name && fk.schema == schema && fk.table == table => {
+                fk.columns.push(column);
+                fk.ref_columns.push(ref_column);
+            }
+            _ => out.push(ForeignKey { name, schema, table, columns: vec![column], ref_schema, ref_table, ref_columns: vec![ref_column] }),
+        }
+    }
+    out
+}
+
+/// Every column as text, so the grid gets the same strings the simple query protocol sends.
+fn select_list(columns: &[Column]) -> String {
+    columns.iter().map(|c| format!("{q}::text AS {q}", q = quote_ident(&c.name))).collect::<Vec<_>>().join(", ")
+}
+
+fn predicate(f: &Filter, table: &str, col: &Column, params: &mut Vec<String>) -> Result<String, DbError> {
+    let q = format!("{table}.{}", quote_ident(&col.name));
+    let ty = col.type_name.as_deref().unwrap_or("text");
+    let mut bind = |v: String| {
+        params.push(v);
+        format!("(${}::text)::{ty}", params.len())
+    };
+    let value = || f.value.clone().ok_or_else(|| DbError::msg(format!("The filter on {} needs a value.", col.name)));
+    Ok(match f.op {
+        FilterOp::Eq => format!("{q} = {}", bind(value()?)),
+        FilterOp::Ne => format!("{q} <> {}", bind(value()?)),
+        FilterOp::Lt => format!("{q} < {}", bind(value()?)),
+        FilterOp::Le => format!("{q} <= {}", bind(value()?)),
+        FilterOp::Gt => format!("{q} > {}", bind(value()?)),
+        FilterOp::Ge => format!("{q} >= {}", bind(value()?)),
+        FilterOp::Contains | FilterOp::StartsWith => {
+            let v = escape_like(&value()?);
+            params.push(if f.op == FilterOp::Contains { format!("%{v}%") } else { format!("{v}%") });
+            format!("{q}::text ILIKE ${}::text ESCAPE '\\'", params.len())
+        }
+        FilterOp::IsNull => format!("{q} IS NULL"),
+        FilterOp::IsNotNull => format!("{q} IS NOT NULL"),
+        FilterOp::In => {
+            let mut values: Vec<&String> = Vec::new();
+            for v in &f.values {
+                if !values.contains(&v) {
+                    values.push(v);
+                }
+            }
+            if values.is_empty() {
+                return Err(DbError::msg(format!("The filter on {} needs at least one value.", col.name)));
+            }
+            if values.len() > MAX_IN_VALUES {
+                return Err(DbError::msg(format!("The filter on {} lists more than {MAX_IN_VALUES} values.", col.name)));
+            }
+            let list: Vec<String> = values.into_iter().map(|v| bind(v.clone())).collect();
+            format!("{q} IN ({})", list.join(", "))
+        }
+    })
+}
+
+/// Makes a value safe inside a LIKE pattern whose escape character is `\`.
+fn escape_like(v: &str) -> String {
+    v.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_")
+}
+
+/// An error position inside the free-text condition, told in the user's own text.
+fn rebase_position(mut err: DbError, raw_start: Option<usize>) -> DbError {
+    if let (Some(p), Some(start)) = (err.position, raw_start) {
+        err.position = (p as usize > start).then(|| (p as usize - start) as u32);
+    }
+    err
 }
 
 fn first_text(msgs: &[SimpleQueryMessage]) -> Option<String> {
@@ -497,6 +926,246 @@ mod tests {
     fn identifiers_are_quoted_like_postgres_does() {
         assert_eq!(quote_ident("users"), "\"users\"");
         assert_eq!(quote_ident("we\"ird; DROP TABLE x"), "\"we\"\"ird; DROP TABLE x\"");
+    }
+
+    fn col(name: &str, ty: &str, pk: bool) -> Column {
+        Column { name: name.into(), type_name: Some(ty.into()), primary_key: pk }
+    }
+
+    fn users() -> Vec<Column> {
+        vec![
+            col("id", "integer", true),
+            col("email", "text", false),
+            col("plan", "character varying(255)", false),
+            col("last_login", "timestamp with time zone", false),
+            col("we\"ird", "numeric(10,2)", false),
+            col("tags", "text[]", false),
+        ]
+    }
+
+    fn filter(column: &str, op: FilterOp, value: &str) -> Filter {
+        Filter { column: column.into(), op, value: Some(value.into()), values: vec![] }
+    }
+
+    fn req(filters: Vec<Filter>) -> BrowseRequest {
+        BrowseRequest { filters, limit: 200, offset: 0, ..Default::default() }
+    }
+
+    #[test]
+    fn a_plain_page_selects_every_column_as_text_in_primary_key_order() {
+        let b = build_browse("public", "users", &users(), &req(vec![])).unwrap();
+        assert_eq!(
+            b.sql,
+            "SELECT \"id\"::text AS \"id\", \"email\"::text AS \"email\", \"plan\"::text AS \"plan\", \"last_login\"::text AS \"last_login\", \"we\"\"ird\"::text AS \"we\"\"ird\", \"tags\"::text AS \"tags\" FROM \"public\".\"users\" ORDER BY \"users\".\"id\" LIMIT 200 OFFSET 0"
+        );
+        assert_eq!(b.count_sql, "SELECT count(*) FROM \"public\".\"users\"");
+        assert!(b.params.is_empty() && !b.filtered && b.raw_start.is_none());
+        let b = build_browse("public", "users", &[col("a", "text", false)], &BrowseRequest { limit: 0, offset: 40, ..Default::default() })
+            .unwrap();
+        assert!(b.sql.ends_with("FROM \"public\".\"users\" LIMIT 1 OFFSET 40"), "{}", b.sql);
+    }
+
+    #[test]
+    fn filters_bind_every_value_as_text_cast_to_the_catalog_type() {
+        let b = build_browse(
+            "public",
+            "users",
+            &users(),
+            &req(vec![
+                filter("plan", FilterOp::Eq, "pro"),
+                filter("id", FilterOp::Ge, "10"),
+                filter("last_login", FilterOp::Lt, "2026-01-01"),
+                filter("we\"ird", FilterOp::Ne, "1.5"),
+                filter("tags", FilterOp::Gt, "{}"),
+                filter("email", FilterOp::Contains, "USER_1%"),
+                filter("plan", FilterOp::StartsWith, "te"),
+                filter("last_login", FilterOp::IsNull, ""),
+                filter("email", FilterOp::IsNotNull, ""),
+                Filter { column: "id".into(), op: FilterOp::In, value: None, values: vec!["1".into(), "2".into(), "1".into(), "3".into()] },
+            ]),
+        )
+        .unwrap();
+        let where_ = b.sql.split(" WHERE ").nth(1).unwrap().split(" ORDER BY ").next().unwrap();
+        assert_eq!(
+            where_,
+            "\"users\".\"plan\" = ($1::text)::character varying(255) AND \"users\".\"id\" >= ($2::text)::integer \
+             AND \"users\".\"last_login\" < ($3::text)::timestamp with time zone AND \"users\".\"we\"\"ird\" <> ($4::text)::numeric(10,2) \
+             AND \"users\".\"tags\" > ($5::text)::text[] AND \"users\".\"email\"::text ILIKE $6::text ESCAPE '\\' \
+             AND \"users\".\"plan\"::text ILIKE $7::text ESCAPE '\\' AND \"users\".\"last_login\" IS NULL AND \"users\".\"email\" IS NOT NULL \
+             AND \"users\".\"id\" IN (($8::text)::integer, ($9::text)::integer, ($10::text)::integer)"
+        );
+        assert_eq!(b.params, ["pro", "10", "2026-01-01", "1.5", "{}", "%USER\\_1\\%%", "te%", "1", "2", "3"]);
+        assert!(b.filtered);
+        assert_eq!(b.count_sql, format!("SELECT count(*) FROM \"public\".\"users\" WHERE {where_}"));
+    }
+
+    #[test]
+    fn filters_are_checked_against_the_catalog() {
+        let e = |r: Result<Built, DbError>| r.unwrap_err().message;
+        assert_eq!(e(build_browse("public", "users", &users(), &req(vec![filter("nope", FilterOp::Eq, "1")]))), "Unknown column nope.");
+        assert_eq!(
+            e(build_browse(
+                "public",
+                "users",
+                &users(),
+                &req(vec![Filter { column: "id".into(), op: FilterOp::Eq, value: None, values: vec![] }])
+            )),
+            "The filter on id needs a value."
+        );
+        assert!(e(build_browse(
+            "public",
+            "users",
+            &users(),
+            &req(vec![Filter { column: "id".into(), op: FilterOp::In, value: None, values: vec![] }])
+        ))
+        .contains("at least one value"));
+        let many =
+            Filter { column: "id".into(), op: FilterOp::In, value: None, values: (0..=MAX_IN_VALUES).map(|i| i.to_string()).collect() };
+        assert!(e(build_browse("public", "users", &users(), &req(vec![many]))).contains("more than 200"));
+        let sort =
+            BrowseRequest { sort: Some(Sort { column: "nope".into(), descending: true }), limit: 10, offset: 0, ..Default::default() };
+        assert_eq!(e(build_browse("public", "users", &users(), &sort)), "Unknown column nope.");
+    }
+
+    #[test]
+    fn sorting_keeps_the_primary_key_as_a_tiebreaker() {
+        let sort = |column: &str, descending: bool| BrowseRequest {
+            sort: Some(Sort { column: column.into(), descending }),
+            limit: 10,
+            offset: 0,
+            ..Default::default()
+        };
+        let b = build_browse("public", "users", &users(), &sort("last_login", true)).unwrap();
+        assert!(b.sql.contains(" ORDER BY \"users\".\"last_login\" DESC NULLS LAST, \"users\".\"id\" LIMIT 10"), "{}", b.sql);
+        let b = build_browse("public", "users", &users(), &sort("id", false)).unwrap();
+        assert!(b.sql.contains(" ORDER BY \"users\".\"id\" ASC NULLS LAST LIMIT 10"), "{}", b.sql);
+        let b = build_browse("public", "t", &[col("a", "text", false)], &sort("a", false)).unwrap();
+        assert!(b.sql.contains(" ORDER BY \"t\".\"a\" ASC NULLS LAST LIMIT"), "{}", b.sql);
+    }
+
+    #[test]
+    fn a_free_text_condition_is_one_parenthesised_expression() {
+        let raw = |w: &str| BrowseRequest { where_: Some(w.into()), limit: 10, offset: 0, ..Default::default() };
+        let b = build_browse("public", "users", &users(), &raw("  id < 10 AND plan = 'a;b'  ")).unwrap();
+        assert!(b.sql.contains(" WHERE (id < 10 AND plan = 'a;b') ORDER BY"), "{}", b.sql);
+        assert!(b.filtered && b.params.is_empty());
+        // The position of the condition's first character, so a server error can be told in it.
+        let start = b.raw_start.unwrap();
+        assert_eq!(&b.sql.chars().skip(start).take(7).collect::<String>(), "id < 10");
+        assert_eq!(rebase_position(DbError { position: Some(start as u32 + 4), ..DbError::msg("x") }, b.raw_start).position, Some(4));
+        assert_eq!(rebase_position(DbError { position: Some(3), ..DbError::msg("x") }, b.raw_start).position, None);
+
+        let both = BrowseRequest {
+            filters: vec![filter("plan", FilterOp::Eq, "pro")],
+            where_: Some("id < 10".into()),
+            limit: 10,
+            offset: 0,
+            ..Default::default()
+        };
+        let b = build_browse("public", "users", &users(), &both).unwrap();
+        assert!(b.sql.contains(" WHERE \"users\".\"plan\" = ($1::text)::character varying(255) AND (id < 10) ORDER BY"), "{}", b.sql);
+        assert_eq!(&b.sql.chars().skip(b.raw_start.unwrap()).take(7).collect::<String>(), "id < 10");
+
+        assert!(build_browse("public", "users", &users(), &raw("1=1; DROP TABLE users")).unwrap_err().message.contains("`;`"));
+        assert!(build_browse("public", "users", &users(), &raw(&"x".repeat(MAX_WHERE_BYTES + 1)))
+            .unwrap_err()
+            .message
+            .contains("longer than"));
+        assert!(!build_browse("public", "users", &users(), &raw("   ")).unwrap().filtered, "blank is no condition");
+    }
+
+    #[test]
+    fn foreign_key_rows_fold_into_keys_with_their_column_pairs_in_order() {
+        let r = |name: &str, col: &str, rcol: &str| {
+            (
+                name.to_string(),
+                "public".to_string(),
+                "orders".to_string(),
+                col.to_string(),
+                "public".to_string(),
+                "users".to_string(),
+                rcol.to_string(),
+            )
+        };
+        let fks = fold_foreign_keys(vec![
+            r("orders_user_fk", "user_id", "id"),
+            r("orders_user_fk", "user_org", "org_id"),
+            r("orders_zone_fk", "zone", "id"),
+        ]);
+        assert_eq!(fks.len(), 2);
+        assert_eq!(
+            (fks[0].columns.clone(), fks[0].ref_columns.clone()),
+            (vec!["user_id".to_string(), "user_org".into()], vec!["id".to_string(), "org_id".into()])
+        );
+        assert_eq!((fks[1].name.as_str(), fks[1].ref_table.as_str()), ("orders_zone_fk", "users"));
+        assert!(fold_foreign_keys(vec![]).is_empty());
+    }
+
+    fn cell(column: &str, value: Option<&str>) -> CellEdit {
+        CellEdit { column: column.into(), value: value.map(str::to_string) }
+    }
+
+    #[test]
+    fn edits_become_one_bound_update_per_row_found_by_its_key() {
+        let plan = EditPlan {
+            rows: vec![
+                RowEdit { key: vec![cell("id", Some("1049"))], set: vec![cell("plan", Some("team")), cell("last_login", None)] },
+                RowEdit { key: vec![cell("id", Some("7"))], set: vec![cell("email", Some("o'neil@acme.dev"))] },
+            ],
+        };
+        let st = build_updates("public", "users", &users(), &plan).unwrap();
+        assert_eq!(st.len(), 2);
+        assert_eq!(
+            st[0].sql,
+            "UPDATE \"public\".\"users\" SET \"plan\" = ($1::text)::character varying(255), \"last_login\" = ($2::text)::timestamp with time zone WHERE \"id\" = ($3::text)::integer"
+        );
+        assert_eq!(st[0].params, [Some("team".to_string()), None, Some("1049".to_string())]);
+        let text = preview_text("public", "users", &st, &plan);
+        assert!(text.starts_with("BEGIN;\n") && text.ends_with("COMMIT;\n"), "{text}");
+        assert!(text.contains("-- public.users where id = '1049'\n"), "{text}");
+        assert!(text.contains("-- $1 = 'team', $2 = NULL, $3 = '1049'\n"), "{text}");
+        assert!(text.contains("$1 = 'o''neil@acme.dev'"), "quotes are doubled: {text}");
+    }
+
+    #[test]
+    fn edits_are_refused_when_they_could_change_the_wrong_row() {
+        let e = |rows: Vec<RowEdit>, cols: &[Column]| build_updates("public", "users", cols, &EditPlan { rows }).unwrap_err().message;
+        let ok = || vec![cell("plan", Some("team"))];
+        assert!(e(vec![RowEdit { key: vec![cell("id", Some("1"))], set: ok() }], &[col("a", "text", false)]).contains("no primary key"));
+        assert!(e(vec![], &users()).contains("nothing to commit"));
+        assert!(e(vec![RowEdit { key: vec![], set: ok() }], &users()).contains("missing id"));
+        assert!(e(vec![RowEdit { key: vec![cell("id", None)], set: ok() }], &users()).contains("NULL in the key"));
+        assert!(e(vec![RowEdit { key: vec![cell("id", Some("1")), cell("id", Some("2"))], set: ok() }], &users()).contains("twice"));
+        assert!(e(vec![RowEdit { key: vec![cell("id", Some("1"))], set: vec![] }], &users()).contains("nothing is set"));
+        assert!(e(vec![RowEdit { key: vec![cell("id", Some("1"))], set: vec![cell("id", Some("2"))] }], &users()).contains("primary key"));
+        assert!(e(vec![RowEdit { key: vec![cell("id", Some("1"))], set: vec![cell("nope", Some("2"))] }], &users())
+            .contains("Unknown column nope"));
+        assert!(e(
+            vec![RowEdit { key: vec![cell("id", Some("1"))], set: vec![cell("plan", Some("a")), cell("plan", Some("b"))] }],
+            &users()
+        )
+        .contains("set twice"));
+        let many: Vec<RowEdit> = (0..=MAX_EDIT_ROWS).map(|i| RowEdit { key: vec![cell("id", Some(&i.to_string()))], set: ok() }).collect();
+        assert!(e(many, &users()).contains("at most 500"));
+        // A composite key needs every column, in any order.
+        let cols = vec![col("a", "integer", true), col("b", "text", true), col("v", "text", false)];
+        let st = build_updates(
+            "s",
+            "t",
+            &cols,
+            &EditPlan { rows: vec![RowEdit { key: vec![cell("b", Some("x")), cell("a", Some("1"))], set: vec![cell("v", None)] }] },
+        )
+        .unwrap();
+        assert_eq!(
+            st[0].sql,
+            "UPDATE \"s\".\"t\" SET \"v\" = ($1::text)::text WHERE \"a\" = ($2::text)::integer AND \"b\" = ($3::text)::text"
+        );
+        assert!(e(vec![RowEdit { key: vec![cell("a", Some("1"))], set: vec![cell("v", None)] }], &cols).contains("missing b"));
+    }
+
+    #[test]
+    fn like_patterns_escape_their_wildcards() {
+        assert_eq!(escape_like("50%_off\\x"), "50\\%\\_off\\\\x");
     }
 
     #[test]

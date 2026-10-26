@@ -10,7 +10,6 @@ const P: Record<string, ReactElement> = {
   stop: <rect x="4.5" y="4.5" width="7" height="7" rx="1" fill="currentColor" />,
   moon: <path d="M13.5 9.5A5.5 5.5 0 0 1 6.5 2.5a5.5 5.5 0 1 0 7 7z" />,
   sun: <><circle cx="8" cy="8" r="3" /><path d="M8 1.5V3M8 13v1.5M1.5 8H3M13 8h1.5M3.4 3.4l1 1M11.6 11.6l1 1M3.4 12.6l1-1M11.6 4.4l1-1" /></>,
-  auto: <><circle cx="8" cy="8" r="5.5" /><path d="M8 2.5v11" /><path d="M8 2.5a5.5 5.5 0 0 1 0 11z" fill="currentColor" /></>,
   x: <path d="M4.5 4.5l7 7M11.5 4.5l-7 7" />,
   code: <path d="M6 4.5L2.5 8 6 11.5M10 4.5L13.5 8 10 11.5" />,
   lock: <><rect x="3.5" y="7" width="9" height="6.5" rx="1.2" /><path d="M5.5 7V5a2.5 2.5 0 0 1 5 0v2" /></>,
@@ -20,6 +19,19 @@ const P: Record<string, ReactElement> = {
   chev: <path d="M6 4l4 4-4 4" />,
   chevd: <path d="M4 6l4 4 4-4" />,
   leaf: <><path d="M8 1.8c2.6 2.2 3.6 4.6 3.6 7 0 2.6-1.6 4.4-3.6 5.4-2-1-3.6-2.8-3.6-5.4 0-2.4 1-4.8 3.6-7z" /><path d="M8 4.5v10" /></>,
+  search: <><circle cx="7" cy="7" r="4.5" /><path d="m10.5 10.5 3.5 3.5" /></>,
+  filter: <path d="M2 3h12l-4.5 5.5V13l-3-1.5v-3z" />,
+  link: <path d="M6.5 9.5l3-3M7 4.5l1-1a2.5 2.5 0 0 1 3.5 3.5l-1 1M9 11.5l-1 1A2.5 2.5 0 0 1 4.5 9l1-1" />,
+  key: <><circle cx="5" cy="10.5" r="2.8" /><path d="m7 8.5 6.5-6.5M11 4.5l1.8 1.8M9.5 6l1.3 1.3" /></>,
+  refresh: <path d="M13 3v3.5H9.5M3 13V9.5h3.5M12.6 6.5A5 5 0 0 0 3.8 5M3.4 9.5a5 5 0 0 0 8.8 1.5" />,
+  sort: <path d="M5 6l3-3 3 3M5 10l3 3 3-3" />,
+  eye: <><path d="M1.5 8S4 3.5 8 3.5 14.5 8 14.5 8 12 12.5 8 12.5 1.5 8 1.5 8z" /><circle cx="8" cy="8" r="2" /></>,
+  copy: <><rect x="5" y="5" width="9" height="9" rx="1.5" /><path d="M11 5V3.5A1.5 1.5 0 0 0 9.5 2h-6A1.5 1.5 0 0 0 2 3.5v6A1.5 1.5 0 0 0 3.5 11H5" /></>,
+  bookmark: <path d="M4.5 2.5h7v11L8 10.8l-3.5 2.7z" />,
+  clock: <><circle cx="8" cy="8" r="5.8" /><path d="M8 4.8V8l2.2 1.6" /></>,
+  terminal: <><rect x="2" y="3" width="12" height="10" rx="1.5" /><path d="M4.8 6.5 6.8 8l-2 1.5M8.5 10h2.8" /></>,
+  trash: <path d="M3 4.5h10M6.5 4.5V3h3v1.5M4.5 4.5l.6 8.5h5.8l.6-8.5" />,
+  schema: <><path d="M2.5 4.5A1.5 1.5 0 0 1 4 3h2.5l1.5 1.5H12a1.5 1.5 0 0 1 1.5 1.5v6A1.5 1.5 0 0 1 12 13.5H4a1.5 1.5 0 0 1-1.5-1.5z" /></>,
 };
 
 export function Icon({ name, size = 16 }: { name: keyof typeof P | string; size?: number }) {

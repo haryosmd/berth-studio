@@ -17,7 +17,7 @@ export function Placeholder({ loading, title, children }: { loading?: boolean; t
 }
 
 /** One line in the sidebar tree: loading, empty or failed. */
-export function TreeNote({ depth, loading, error, children }: { depth?: 'child' | 'grandchild'; loading?: boolean; error?: string; children: ReactNode }) {
+export function TreeNote({ depth, loading, error, children }: { depth?: 'lvl1' | 'lvl2'; loading?: boolean; error?: string; children: ReactNode }) {
   return (
     <div className={`node${depth ? ` ${depth}` : ''} note-row${error ? ' bad' : ''}`} title={error} role={loading ? 'status' : undefined}>
       {loading && <Spinner />}<span className="lbl">{children}</span>
