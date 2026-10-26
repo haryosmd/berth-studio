@@ -6,6 +6,7 @@ import {
   hasWrite, nextEnvId, validEnvId, documentsToGrid, cellText, bsonType, idText, formatBytes, groupBySchema, matchesFilter, browseStatus,
   filterText, parseInValues, findRows, rowCountText, nextSort, compact, attachForeignKeys, fkFilters, fkLabel, tableLabel,
   rowKey, editKey, parseCellInput, editsToPlan, canEditTable,
+  sqlSummary, historyDay, clockTime, toCsv, toJson, uniqueNames, exportName, toSqlNamespace, fuzzyScore,
 } from '../src/logic.ts';
 
 const [dev, staging, prod] = DEFAULT_ENVIRONMENTS;
@@ -204,4 +205,56 @@ test('formatBytes shows kilobytes below a megabyte and one decimal above', () =>
   assert.equal(formatBytes(0), '0 KB');
   assert.equal(formatBytes(860_000), '840 KB');
   assert.equal(formatBytes(13_002_342), '12.4 MB');
+});
+
+test('sqlSummary skips comments and blank lines', () => {
+  assert.equal(sqlSummary('-- top users\n\nSELECT id,\n  email FROM users'), 'SELECT id,');
+  assert.equal(sqlSummary('  select   1  '), 'select 1');
+  assert.equal(sqlSummary('-- only a comment'), '-- only a comment');
+  assert.equal(sqlSummary(''), '');
+});
+
+test('history groups by local day and shows a 24-hour time', () => {
+  const now = new Date(2026, 9, 24, 10, 0).getTime();
+  assert.equal(historyDay(new Date(2026, 9, 24, 0, 5).getTime(), now), 'Today');
+  assert.equal(historyDay(new Date(2026, 9, 23, 23, 59).getTime(), now), 'Yesterday');
+  assert.equal(historyDay(new Date(2026, 9, 20, 12).getTime(), now), 'Tue, Oct 20');
+  assert.equal(clockTime(new Date(2026, 9, 24, 9, 2).getTime()), '09:02');
+});
+
+test('toCsv quotes per RFC 4180 and defuses formulas but not numbers', () => {
+  assert.equal(toCsv(['id', 'note'], [['1', 'a,b'], ['2', 'say "hi"'], ['3', null], ['4', 'two\nlines']]),
+    'id,note\r\n1,"a,b"\r\n2,"say ""hi"""\r\n3,\r\n4,"two\nlines"\r\n');
+  assert.equal(toCsv(['v'], [['=HYPERLINK("x")'], ['-5'], ['-1.5e3'], ['+cmd'], ['@sum'], ['-']]),
+    'v\r\n"\'=HYPERLINK(""x"")"\r\n-5\r\n-1.5e3\r\n\'+cmd\r\n\'@sum\r\n\'-\r\n');
+});
+
+test('toJson keeps text values, null for NULL, and unique keys', () => {
+  assert.deepEqual(uniqueNames(['id', 'id', 'id_2', 'name']), ['id', 'id_2', 'id_2_2', 'name']);
+  assert.deepEqual(JSON.parse(toJson(['id', 'id', 'n'], [['1', '2', null]])), [{ id: '1', id_2: '2', n: null }]);
+});
+
+test('exportName makes a safe file name', () => {
+  assert.equal(exportName('users', 'csv'), 'users.csv');
+  assert.equal(exportName('revenue-by-plan.sql', 'json'), 'revenue-by-plan.json');
+  assert.equal(exportName('Query 1 / draft', 'csv'), 'Query-1-draft.csv');
+  assert.equal(exportName('../..', 'csv'), 'export.csv');
+});
+
+test('toSqlNamespace nests schema, table and columns with their types', () => {
+  const ns = toSqlNamespace([
+    { schema: 'public', table: 'users', column: 'id', typeName: 'integer' },
+    { schema: 'public', table: 'users', column: 'email', typeName: 'text' },
+    { schema: 'billing', table: 'invoices', column: 'total', typeName: 'numeric(10,2)' },
+  ]);
+  assert.deepEqual(ns.public.users.map(c => c.label), ['id', 'email']);
+  assert.deepEqual(ns.billing.invoices[0], { label: 'total', type: 'property', detail: 'numeric(10,2)' });
+});
+
+test('fuzzyScore matches in order and ranks prefixes and word starts first', () => {
+  assert.equal(fuzzyScore('usr', 'orders'), null);
+  assert.ok(fuzzyScore('usr', 'users') !== null);
+  assert.ok(fuzzyScore('users', 'users · acme-db') > fuzzyScore('users', 'old_users_archive'));
+  assert.ok(fuzzyScore('nc', 'New connection') > fuzzyScore('nc', 'sync'));
+  assert.equal(fuzzyScore('  ', 'anything'), 0);
 });

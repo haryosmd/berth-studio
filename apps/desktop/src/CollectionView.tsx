@@ -4,6 +4,7 @@
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react';
 import { api } from './api';
 import { ConfirmDialog } from './ConfirmDialog';
+import { ExportMenu } from './ExportMenu';
 import { Grid } from './Grid';
 import { Icon } from './Icons';
 import { Placeholder, Spinner } from './Status';
@@ -116,6 +117,10 @@ export function CollectionView({ conn, env, envLabel, db, collection, readOnly, 
         <span className="grow" />
         {envControl}
         {readOnly && <span className="chip read" title="This profile opens read-only">read-only</span>}
+        {mode !== 'indexes' && (
+          <ExportMenu name={collection} columns={grid.columns.map(c => c.name)} rows={grid.rows} partial={result?.truncated}
+            json={() => `${JSON.stringify(result?.documents ?? [], null, 2)}\n`} />
+        )}
       </div>
 
       {mode === 'documents' && (

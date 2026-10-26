@@ -271,3 +271,56 @@ async fn tls_trusts_the_ca_file_besides_the_system_store() {
         assert!(err.message.contains("UnknownIssuer") && err.message.contains("CA certificate"), "{}", err.message);
     }
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn structure_reads_the_catalog_and_its_ddl_replays() {
+    let Some(s) = app(false).await else { return };
+    let cols = s.schema_columns().await.unwrap();
+    assert!(cols.iter().any(|c| c.schema == "public" && c.table == "users" && c.column == "email" && c.type_name == "text"));
+    assert!(cols.iter().all(|c| c.schema != "pg_catalog"));
+
+    let orders = s.structure("public", "orders").await.unwrap();
+    assert_eq!(orders.kind, "table");
+    assert!(orders
+        .columns
+        .iter()
+        .any(|c| c.name == "id" && c.primary_key && !c.nullable && c.default.as_deref().is_some_and(|d| d.starts_with("nextval("))));
+    assert!(orders.constraints.iter().any(|k| k.kind == "foreign key" && k.definition.contains("REFERENCES users(id)")));
+    assert!(orders.indexes.iter().any(|i| i.primary && i.constraint.as_deref() == Some("orders_pkey")));
+    assert!(s.structure("public", "nope").await.unwrap_err().message.contains("does not exist"));
+
+    // A table with every feature the DDL covers, rebuilt in a second schema from its own DDL.
+    s.run(
+        "DROP SCHEMA IF EXISTS berth_ddl_a CASCADE; DROP SCHEMA IF EXISTS berth_ddl_b CASCADE;
+           CREATE SCHEMA berth_ddl_a; CREATE SCHEMA berth_ddl_b;
+           CREATE TABLE berth_ddl_a.items (
+             id int GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+             qty int NOT NULL CHECK (qty > 0),
+             price numeric(10,2) NOT NULL DEFAULT 0,
+             total numeric GENERATED ALWAYS AS (qty * price) STORED,
+             \"Label\" text UNIQUE,
+             user_id int REFERENCES public.users (id));
+           CREATE INDEX items_qty_idx ON berth_ddl_a.items (qty DESC) WHERE qty > 1;
+           COMMENT ON TABLE berth_ddl_a.items IS 'it''s a test';
+           COMMENT ON COLUMN berth_ddl_a.items.\"Label\" IS 'shown';
+           CREATE VIEW berth_ddl_a.big AS SELECT id FROM berth_ddl_a.items WHERE qty > 10;",
+    )
+    .await
+    .unwrap();
+    let a = s.structure("berth_ddl_a", "items").await.unwrap();
+    let v = s.structure("berth_ddl_a", "big").await.unwrap();
+    assert_eq!((a.constraints.len(), a.indexes.len()), (4, 3), "{a:#?}");
+    assert_eq!(v.kind, "view");
+    s.run(&a.ddl.replace("berth_ddl_a", "berth_ddl_b")).await.unwrap_or_else(|e| panic!("{}\n{}", e.message, a.ddl));
+    s.run(&v.ddl.replace("berth_ddl_a", "berth_ddl_b")).await.unwrap_or_else(|e| panic!("{}\n{}", e.message, v.ddl));
+    let b = s.structure("berth_ddl_b", "items").await.unwrap();
+    assert_eq!(b.columns, a.columns);
+    assert_eq!(b.comment.as_deref(), Some("it's a test"));
+    assert_eq!(
+        b.constraints.iter().map(|k| &k.definition).collect::<Vec<_>>(),
+        a.constraints.iter().map(|k| &k.definition).collect::<Vec<_>>()
+    );
+    assert_eq!(b.indexes.iter().map(|i| &i.columns).collect::<Vec<_>>(), a.indexes.iter().map(|i| &i.columns).collect::<Vec<_>>());
+    assert!(s.structure("berth_ddl_b", "big").await.unwrap().view_definition.unwrap().contains("qty > 10"));
+    s.run("DROP SCHEMA berth_ddl_a CASCADE; DROP SCHEMA berth_ddl_b CASCADE").await.unwrap();
+}

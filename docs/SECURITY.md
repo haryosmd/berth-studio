@@ -96,7 +96,8 @@ Everything Berth Studio displays is untrusted. That includes a database value, a
   - A strict Content Security Policy with no remote scripts, no `eval` and no inline event handlers.
   - The prototype test suite already rejects inline handlers, `eval`, `new Function` and network calls in the page.
   - Tauri capabilities are granted per window. App commands are allowlisted one by one in `apps/desktop/src-tauri/build.rs` and `capabilities/main.json`.
-  - The `shell`, `fs` and `http` plugins are not included at all.
+  - The `shell`, `fs` and `http` plugins are not registered, and the webview never passes a file path to Rust.
+  - **Exports** (implemented; `export.rs`): the webview sends the text and a suggested name. Rust strips any folder from the name, shows the native Save dialog, and writes only the path that dialog returns, through a temporary file and a rename, readable by the user only. The dialog plugin is used from Rust; its commands are not granted. CSV cells that a spreadsheet would run as a formula (`=`, `+`, `-`, `@`, tab, carriage return, unless the cell is a plain number) get a leading apostrophe.
   - When workspaces become user-chosen folders, the file access will be limited to that folder.
 - **Imports** (prototype; `importText` and its tests):
   - **Limits:** strict parsing with size limits of 10 MB, folder depth of 24 and 5000 items.
@@ -154,6 +155,7 @@ These controls guard against human error. That threat is real even though nobody
   - Only `keychain://berth-studio/...` references are accepted. A workspace file cannot point the app at another program's keychain item.
   - A stored password stays bound to the server and user it was saved for. When an endpoint's host, port, user, MongoDB connection string or auth database changes, the password is dropped and must be typed again. So an edited or tampered workspace cannot send a saved password to another host. Connection tests apply the same rule.
   - Secrets are never in workspace files, logs, crash reports or the webview.
+  - **Query history** (implemented; `history.rs`): every statement that reached a server is kept in `history.jsonl` in the app data folder, readable by the user only and never in the workspace. SQL that mentions a password (`ALTER ROLE … PASSWORD`) is not recorded, nor is SQL over 64 KiB. The newest 5,000 runs are kept, and the history can be cleared per connection. Saved queries are in the workspace file, so whatever SQL a user saves travels with it.
   - The webview only ever sees a keychain reference such as `keychain://berth-studio/acme-db/prod/write`.
   - On macOS the Keychain items carry an access control list tied to Berth Studio's code signature. Another app that asks for them triggers a system prompt.
 - **Touch ID or the system password** is required to reveal a secret in the UI.

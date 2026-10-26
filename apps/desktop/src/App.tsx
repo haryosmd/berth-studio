@@ -1,15 +1,20 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
 import { api } from './api';
 import { CollectionView } from './CollectionView';
+import { CommandPalette, type PaletteItem } from './CommandPalette';
+import { AskDialog, PromptDialog } from './ConfirmDialog';
 import { ConnectionSheet } from './ConnectionSheet';
 import { EnvironmentsSheet } from './EnvironmentsSheet';
+import { HistoryDialog } from './HistoryDialog';
 import { Icon, Mark } from './Icons';
-import { QueryView } from './QueryView';
+import { QueryView, START } from './QueryView';
 import { TableView } from './TableView';
 import { Spinner, TreeNote } from './Status';
 import { UpdateButton } from './UpdateButton';
-import { DEFAULT_ENVIRONMENTS, browseStatus, compact, effectiveEnv, filterText, findEnv, groupBySchema, hasRead, hasWrite, matchesFilter } from './logic';
-import type { CollectionInfo, Connection, DbError, EnvId, Environment, Filter, MongoOverview, Role, Table } from './types';
+import {
+  DEFAULT_ENVIRONMENTS, browseStatus, clockTime, compact, effectiveEnv, filterText, findEnv, groupBySchema, hasRead, hasWrite, matchesFilter, sqlSummary,
+} from './logic';
+import type { CollectionInfo, Connection, DbError, EnvId, Environment, Filter, HistoryEntry, MongoOverview, Role, SavedQuery, SchemaColumn, Table } from './types';
 
 /** What the footer shows for the active tab. `browse` marks a table tab, whose session is read-only whatever the profile allows. */
 export interface Status { role: Role; host: string; detail: string; readOnly: boolean; browse?: boolean }
@@ -17,7 +22,8 @@ export interface Status { role: Role; host: string; detail: string; readOnly: bo
 /** Every tab follows the workspace environment unless `pin` holds its own. */
 type Tab = { key: string; conn: string; pin?: EnvId } & (
   | { kind: 'table'; schema: string; table: string; filters?: Filter[] }
-  | { kind: 'query'; n: number }
+  // `sql` is the editor's text; `saved` and `name` link the tab to a saved query.
+  | { kind: 'query'; n: number; sql: string; saved?: string; name?: string }
   | { kind: 'collection'; db: string; collection: string }
 );
 type Theme = 'system' | 'light' | 'dark';
@@ -28,6 +34,10 @@ const pref = {
   get: (k: string) => { try { return localStorage.getItem(`berth-${k}`); } catch { return null; } },
   set: (k: string, v: string) => { try { localStorage.setItem(`berth-${k}`, v); } catch { /* storage may be unavailable */ } },
 };
+
+const byName = (a: SavedQuery, b: SavedQuery) => a.name.toLowerCase().localeCompare(b.name.toLowerCase());
+/** How many recent runs the sidebar lists; the history dialog shows the rest. */
+const RECENT = 15;
 
 const isError = (v: unknown): v is DbError => typeof v === 'object' && v !== null && 'message' in v && !Array.isArray(v);
 
@@ -43,6 +53,8 @@ export function App() {
   const [tables, setTables] = useState<Record<string, Loaded<Table[]>>>({});
   const [overviews, setOverviews] = useState<Record<string, Loaded<MongoOverview>>>({});
   const [collections, setCollections] = useState<Record<string, Loaded<CollectionInfo[]>>>({});
+  /** Every readable column per connection and environment, for SQL completion. */
+  const [schemaCache, setSchemaCache] = useState<Record<string, Loaded<SchemaColumn[]>>>({});
   const [tabs, setTabs] = useState<Tab[]>([]);
   const [active, setActive] = useState<string | null>(null);
   const [sheet, setSheet] = useState<{ conn: Connection | null; env: EnvId } | null>(null);
@@ -55,26 +67,52 @@ export function App() {
   const filtering = filter.trim().length > 0;
   // Until the workspace is read, show a loading row instead of an empty workspace or default environments.
   const [ready, setReady] = useState(false);
+  const [savedQueries, setSavedQueries] = useState<SavedQuery[]>([]);
+  const [recent, setRecent] = useState<HistoryEntry[]>([]);
+  const [historyFor, setHistoryFor] = useState<{ conn: string | null; tab?: string } | null>(null);
+  const [naming, setNaming] = useState<string | null>(null);
+  const [ask, setAsk] = useState<{ title: string; body: ReactNode; action: string; run: () => Promise<void> } | null>(null);
+  const [inject, setInject] = useState<{ tab: string; sql: string; seq: number } | null>(null);
+  const [toast, setToast] = useState<{ text: string; bad?: boolean } | null>(null);
+  const toastTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
+  const flash = useCallback((text: string, bad?: boolean) => {
+    clearTimeout(toastTimer.current);
+    setToast({ text, bad });
+    toastTimer.current = setTimeout(() => setToast(null), bad ? 6000 : 3500);
+  }, []);
+  const refreshRecent = useCallback(() => { api.listHistory(null, null, RECENT).then(setRecent).catch(() => {}); }, []);
+  const saveActive = useRef<() => void>(() => {});
+  const [palette, setPalette] = useState(false);
 
   useEffect(() => {
-    Promise.all([api.listEnvironments(), api.listConnections()])
-      .then(([e, c]) => {
+    Promise.all([api.listEnvironments(), api.listConnections(), api.listSavedQueries()])
+      .then(([e, c, q]) => {
         setEnvs(e);
         setConns(c);
+        setSavedQueries(q);
         if (!findEnv(e, env)) setEnvState(e[0].id);
         if (c.length === 1) setOpen({ [c[0].id]: true });
       })
       .catch((e: DbError) => setLoadError(e.message ?? String(e)))
       .finally(() => setReady(true));
+    refreshRecent();
     // Loaded once at start; later changes come back from the sheets.
   }, []);
   // ⌘P (Ctrl+P elsewhere) jumps to the sidebar filter; without preventDefault the webview would print.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if ((e.metaKey || e.ctrlKey) && !e.shiftKey && !e.altKey && e.key.toLowerCase() === 'p') {
+      if (!(e.metaKey || e.ctrlKey) || e.shiftKey || e.altKey) return;
+      const k = e.key.toLowerCase();
+      if (k === 'p') {
         e.preventDefault();
         filterRef.current?.focus();
         filterRef.current?.select();
+      } else if (k === 's') {
+        e.preventDefault();
+        saveActive.current();
+      } else if (k === 'k') {
+        e.preventDefault();
+        setPalette(p => !p);
       }
     };
     window.addEventListener('keydown', onKey);
@@ -85,6 +123,16 @@ export function App() {
     if (theme === 'system') root.removeAttribute('data-theme'); else root.setAttribute('data-theme', theme);
     pref.set('theme', theme);
   }, [theme]);
+  const [systemDark, setSystemDark] = useState(() => matchMedia('(prefers-color-scheme: dark)').matches);
+  useEffect(() => {
+    const m = matchMedia('(prefers-color-scheme: dark)');
+    const on = () => setSystemDark(m.matches);
+    m.addEventListener('change', on);
+    return () => m.removeEventListener('change', on);
+  }, []);
+  const dark = theme === 'system' ? systemDark : theme === 'dark';
+  // One button flips light and dark; landing back on the system's own theme follows macOS again.
+  const toggleTheme = () => setTheme(dark === systemDark ? (dark ? 'light' : 'dark') : 'system');
 
   const setEnv = (e: EnvId) => { setEnvState(e); pref.set('env', e); setStatus(null); };
   const workspaceEnv = findEnv(envs, env) ?? envs[0];
@@ -105,6 +153,26 @@ export function App() {
     }
   }, [conns, env, open, tables, overviews]);
 
+  // The active query tab's connection gets its schema cache, once per connection and environment.
+  const activeTab = tabs.find(t => t.key === active);
+  const schemaKey = activeTab?.kind === 'query' ? `${activeTab.conn}|${effectiveEnv(envs, env, activeTab.pin)}` : null;
+  useEffect(() => {
+    if (!schemaKey || schemaCache[schemaKey]) return;
+    const [conn, e] = schemaKey.split('|');
+    if (!conns.find(c => c.id === conn)?.profiles[e]) return;
+    setSchemaCache(m => ({ ...m, [schemaKey]: 'loading' }));
+    api.schemaColumns(conn, e).then(v => setSchemaCache(m => ({ ...m, [schemaKey]: v }))).catch((x: DbError) => setSchemaCache(m => ({ ...m, [schemaKey]: x })));
+  }, [schemaKey, schemaCache, conns]);
+  /** After a run: the history gains it, and DDL makes the sidebar and the completion cache stale. */
+  const onRan = useCallback((sql: string, k: string) => {
+    refreshRecent();
+    if (/^\s*(create|alter|drop|comment|truncate)\b/im.test(sql.replace(/--.*$/gm, ''))) {
+      const drop = <T,>(m: Record<string, T>) => { const { [k]: _, ...rest } = m; return rest; };
+      setSchemaCache(drop);
+      setTables(drop);
+    }
+  }, [refreshRecent]);
+
   const toggleDb = (c: Connection, db: string) => {
     const k = `${c.id}|${env}|${db}`;
     const next = !open[k];
@@ -122,10 +190,47 @@ export function App() {
     const chips = filters?.length ? filters : undefined;
     openTab({ key: chips ? `${base}|${chips.map(filterText).join(' & ')}` : base, kind: 'table', conn, schema, table, filters: chips });
   };
-  const newQuery = (conn: string) => {
-    const n = tabs.filter(t => t.kind === 'query').length + 1;
-    openTab({ key: `q|${conn}|${Date.now()}`, kind: 'query', conn, n });
+  const nextQueryN = () => tabs.filter(t => t.kind === 'query').length + 1;
+  const newQuery = (conn: string, sql = START) => openTab({ key: `q|${conn}|${Date.now()}`, kind: 'query', conn, n: nextQueryN(), sql });
+  const patchQuery = (key: string, patch: { sql?: string; saved?: string; name?: string }) =>
+    setTabs(ts => ts.map(t => (t.key === key && t.kind === 'query' ? { ...t, ...patch } : t)));
+  const openSaved = (q: SavedQuery) => {
+    const open = tabs.find(t => t.kind === 'query' && t.saved === q.id);
+    if (open) setActive(open.key);
+    else openTab({ key: `s|${q.id}`, kind: 'query', conn: q.conn, n: nextQueryN(), sql: q.sql, saved: q.id, name: q.name });
   };
+  /** Saves a query tab: in place when it came from a saved query, otherwise after asking for a name. */
+  const saveTab = async (key: string, name?: string) => {
+    const t = tabs.find(x => x.key === key);
+    if (!t || t.kind !== 'query') return;
+    const existing = t.saved ? savedQueries.find(q => q.id === t.saved) : undefined;
+    if (!existing && name === undefined) { setNaming(key); return; }
+    try {
+      const q = await api.saveQuery({ id: existing?.id ?? '', name: name ?? existing?.name ?? '', conn: t.conn, sql: t.sql });
+      setSavedQueries(qs => [...qs.filter(x => x.id !== q.id), q].sort(byName));
+      patchQuery(key, { saved: q.id, name: q.name });
+      flash(`Saved ${q.name}`);
+    } catch (e) {
+      flash((e as DbError).message, true);
+    }
+  };
+  saveActive.current = () => { if (active?.startsWith('q|') || active?.startsWith('s|')) saveTab(active); };
+  const deleteSaved = (q: SavedQuery) => setAsk({
+    title: 'Delete this saved query?',
+    body: <><b>{q.name}</b> is removed from the workspace. An open tab keeps its text.</>,
+    action: 'Delete',
+    run: async () => {
+      await api.deleteSavedQuery(q.id);
+      setSavedQueries(qs => qs.filter(x => x.id !== q.id));
+      setTabs(ts => ts.map(t => (t.kind === 'query' && t.saved === q.id ? { ...t, saved: undefined } : t)));
+    },
+  });
+  const clearHistory = (conn: string | null) => setAsk({
+    title: conn ? `Clear the history of ${conn}?` : 'Clear all query history?',
+    body: 'The statements are deleted from this Mac. Saved queries stay.',
+    action: 'Clear history',
+    run: async () => { await api.clearHistory(conn); refreshRecent(); setHistoryFor(null); },
+  });
   const closeTab = (key: string) => {
     setTabs(ts => {
       const i = ts.findIndex(t => t.key === key);
@@ -147,7 +252,7 @@ export function App() {
   const saved = (c: Connection) => {
     setConns(cs => [...cs.filter(x => x.id !== c.id), c].sort((a, b) => a.id.localeCompare(b.id)));
     const drop = <T,>(m: Record<string, T>) => Object.fromEntries(Object.entries(m).filter(([k]) => !k.startsWith(`${c.id}|`)));
-    setTables(drop); setOverviews(drop); setCollections(drop);
+    setTables(drop); setOverviews(drop); setCollections(drop); setSchemaCache(drop);
     setOpen(o => ({ ...o, [c.id]: true }));
     setSheet(null);
   };
@@ -160,9 +265,54 @@ export function App() {
     setEnvs(next);
     if (!findEnv(next, env)) setEnv(next[0].id);
     setTabs(ts => ts.map(t => (t.pin && !findEnv(next, t.pin) ? { ...t, pin: undefined } : t)));
-    setTables({}); setOverviews({}); setCollections({});
+    setTables({}); setOverviews({}); setCollections({}); setSchemaCache({});
     setConns(await api.listConnections());
     setEnvSheet(false);
+  };
+
+  // Sidebar sections below the connections. "+" opens a query on the tab's connection, or the first one that can.
+  const sqlConns = conns.filter(c => c.engine === 'postgres' && c.profiles[env]);
+  const queryConn = tabConn?.engine === 'postgres' && tabConn.profiles[env] ? tabConn.id : sqlConns[0]?.id;
+  const shownSaved = savedQueries.filter(q => !filtering || matchesFilter(filter, q.name, q.conn));
+  const shownRecent = recent.filter(e => !filtering || matchesFilter(filter, sqlSummary(e.sql), e.conn));
+  const secOpen = (id: string) => open[`sec:${id}`] !== false || filtering;
+  const toggleSec = (id: string) => setOpen(o => ({ ...o, [`sec:${id}`]: !secOpen(id) }));
+  const activeSaved = tab?.kind === 'query' ? tab.saved : undefined;
+
+  /** What ⌘K offers: everything the sidebar has loaded, plus the app's actions. */
+  const paletteItems = (): PaletteItem[] => {
+    const items: PaletteItem[] = [];
+    for (const c of conns) {
+      const list = tables[`${c.id}|${env}`];
+      if (!Array.isArray(list)) continue;
+      for (const t of list) {
+        items.push({ group: 'Tables', icon: t.kind === 'table' ? 'table' : 'view', label: t.name, sub: `${t.schema} · ${c.id}`, run: () => openTable(c.id, t.schema, t.name) });
+      }
+    }
+    for (const [k, list] of Object.entries(collections)) {
+      const [conn, e, db] = k.split('|');
+      if (e !== env || !Array.isArray(list)) continue;
+      for (const col of list) {
+        items.push({ group: 'Collections', icon: 'leaf', label: col.name, sub: `${db} · ${conn}`,
+          run: () => openTab({ key: `m|${conn}|${db}.${col.name}`, kind: 'collection', conn, db, collection: col.name }) });
+      }
+    }
+    for (const q of savedQueries) items.push({ group: 'Saved queries', icon: 'bookmark', label: q.name, sub: q.conn, run: () => openSaved(q) });
+    for (const c of conns) {
+      if (!c.profiles[env]) continue;
+      if (c.engine === 'postgres') items.push({ group: 'Connections', icon: 'code', label: `New query on ${c.id}`, sub: workspaceEnv.label, run: () => newQuery(c.id) });
+      items.push({ group: 'Connections', icon: c.engine === 'mongodb' ? 'leaf' : 'db', label: `Browse ${c.id}`, sub: 'opens it in the sidebar', run: () => setOpen(o => ({ ...o, [c.id]: true })) });
+    }
+    if (tab?.kind === 'query') items.push({ group: 'Actions', icon: 'bookmark', label: 'Save this query', sub: '⌘S', run: () => saveTab(tab.key) });
+    items.push(
+      { group: 'Actions', icon: 'plus', label: 'New connection', run: () => setSheet({ conn: null, env }) },
+      { group: 'Actions', icon: 'gear', label: 'Edit environments', run: () => setEnvSheet(true) },
+      ...envs.filter(e => e.id !== env).map(e => ({ group: 'Actions', icon: 'db', label: `Switch to ${e.label}`, sub: e.production ? 'production, opens read-only' : undefined, run: () => setEnv(e.id) })),
+      { group: 'Actions', icon: dark ? 'sun' : 'moon', label: 'Toggle light / dark', sub: dark ? 'now dark' : 'now light', run: toggleTheme },
+      { group: 'Actions', icon: 'clock', label: 'Query history', run: () => setHistoryFor({ conn: null }) },
+      { group: 'Actions', icon: 'search', label: 'Filter the sidebar', sub: '⌘P', run: () => setTimeout(() => filterRef.current?.focus()) },
+    );
+    return items;
   };
 
   const envControl = tab && (
@@ -197,12 +347,11 @@ export function App() {
         )}
         <button className="iconbtn" aria-label="Edit environments" title="Edit environments" onClick={() => setEnvSheet(true)}><Icon name="gear" /></button>
         <span className="sep" aria-hidden />
-        <label className="target appearance" title="Appearance">
-          <Icon name={theme === 'dark' ? 'moon' : theme === 'light' ? 'sun' : 'auto'} />
-          <select value={theme} onChange={e => setTheme(e.target.value as Theme)} aria-label="Appearance">
-            <option value="system">System</option><option value="light">Light</option><option value="dark">Dark</option>
-          </select>
-        </label>
+        <button className={`iconbtn themebtn${theme === 'system' ? '' : ' override'}`} onClick={toggleTheme}
+          aria-label={dark ? 'Switch to light mode' : 'Switch to dark mode'}
+          title={`${dark ? 'Switch to light mode' : 'Switch to dark mode'} · ${theme === 'system' ? 'now following system' : `system is ${systemDark ? 'dark' : 'light'}`}`}>
+          <Icon name={dark ? 'sun' : 'moon'} />
+        </button>
         <UpdateButton />
       </div>
 
@@ -248,7 +397,7 @@ export function App() {
                     </button>
                     <span className="acts">
                       {c.engine === 'postgres' && p && (
-                        <button className="iconbtn" aria-label={`New query on ${c.id}`} title="New query" onClick={() => newQuery(c.id)}><Icon name="code" size={14} /></button>
+                        <button className="iconbtn always" aria-label={`New query on ${c.id}`} title="New query" onClick={() => newQuery(c.id)}><Icon name="code" size={14} /></button>
                       )}
                       <button className="iconbtn" aria-label={`Edit the profiles of ${c.id}`} title="Edit profiles" onClick={() => setSheet({ conn: c, env })}><Icon name="gear" size={14} /></button>
                     </span>
@@ -333,7 +482,7 @@ export function App() {
                 </div>
               );
             })}
-            {filtering && ready && conns.length > 0 && !conns.some(c => {
+            {filtering && ready && conns.length > 0 && !shownSaved.length && !shownRecent.length && !conns.some(c => {
               const k = `${c.id}|${env}`;
               const list = tables[k];
               const names = Array.isArray(list) ? list.flatMap(t => [t.schema, t.name]) : [];
@@ -346,6 +495,55 @@ export function App() {
                 <button className="btn primary" onClick={() => setSheet({ conn: null, env })}><Icon name="plus" />New connection</button>
               </div>
             )}
+
+            {ready && (!filtering || shownSaved.length > 0) && (
+              <section className="side-sec" aria-label="Saved queries">
+                <div className="sec-head">
+                  <button className="sec-toggle" aria-expanded={secOpen('saved')} onClick={() => toggleSec('saved')}>
+                    <span className="tw"><Icon name="chevd" size={12} /></span><Icon name="bookmark" size={13} />Saved queries<span className="cnt">{savedQueries.length}</span>
+                  </button>
+                  <button className="iconbtn" aria-label="New query" title={queryConn ? `New query on ${queryConn}` : 'Add a PostgreSQL connection first'} disabled={!queryConn}
+                    onClick={() => queryConn && newQuery(queryConn)}><Icon name="plus" /></button>
+                </div>
+                {secOpen('saved') && (shownSaved.length ? shownSaved.map(q => (
+                  <div key={q.id} className={`node conn${activeSaved === q.id ? ' active' : ''}`}>
+                    <button className="node-btn" onClick={() => openSaved(q)} title={`${q.name} · ${q.conn}`}>
+                      <Icon name="code" /><span className="lbl">{q.name}</span><span className="meta">{q.conn}</span>
+                    </button>
+                    <span className="acts">
+                      <button className="iconbtn" aria-label={`Delete ${q.name}`} title="Delete" onClick={() => deleteSaved(q)}><Icon name="trash" size={14} /></button>
+                    </span>
+                  </div>
+                )) : <TreeNote>Save a query tab with ⌘S to keep it here.</TreeNote>)}
+              </section>
+            )}
+
+            {ready && (!filtering || shownRecent.length > 0) && (
+              <section className="side-sec" aria-label="History">
+                <div className="sec-head">
+                  <button className="sec-toggle" aria-expanded={secOpen('history')} onClick={() => toggleSec('history')}>
+                    <span className="tw"><Icon name="chevd" size={12} /></span><Icon name="clock" size={13} />History
+                  </button>
+                  <button className="iconbtn" aria-label="Show all history" title="Show all history" onClick={() => setHistoryFor({ conn: null })}><Icon name="search" size={14} /></button>
+                </div>
+                {secOpen('history') && (shownRecent.length ? <>
+                  {shownRecent.map((e, i) => (
+                    <button key={`${e.at}-${i}`} className="node hist" onClick={() => newQuery(e.conn, e.sql)}
+                      title={`${e.conn} · ${e.env} · ${e.error ? `failed: ${e.error}` : `${e.rows.toLocaleString('en-US')} rows`} · ${e.elapsedMs} ms\n\n${e.sql}`}>
+                      <i className={`hdot${e.error ? ' bad' : ''}`} />
+                      <span className="lbl mono">{sqlSummary(e.sql)}</span>
+                      <span className="meta">{clockTime(e.at)}</span>
+                    </button>
+                  ))}
+                  {!filtering && <button className="node more" onClick={() => setHistoryFor({ conn: null })}>Show all…</button>}
+                </> : <TreeNote>Statements you run show here.</TreeNote>)}
+              </section>
+            )}
+          </div>
+          <div className="side-foot">
+            <button className="side-palette" onClick={() => setPalette(true)} title="Search tables, queries and actions">
+              <Icon name="terminal" size={14} />Command palette<kbd>⌘K</kbd>
+            </button>
           </div>
         </aside>
 
@@ -357,7 +555,8 @@ export function App() {
                 return (
                   <div key={t.key} className={`tab${te?.production ? ' prod-tab' : ''}`} role="tab" aria-selected={t.key === active} onClick={() => setActive(t.key)}>
                     <Icon name={t.kind === 'query' ? 'code' : t.kind === 'collection' ? 'leaf' : 'table'} size={14} />
-                    <span className="lbl">{t.kind === 'table' ? t.table : t.kind === 'collection' ? t.collection : `Query ${t.n}`}</span>
+                    <span className="lbl">{t.kind === 'table' ? t.table : t.kind === 'collection' ? t.collection : t.name ?? `Query ${t.n}`}</span>
+                    {t.kind === 'query' && t.saved && savedQueries.find(q => q.id === t.saved)?.sql !== t.sql && <span className="unsaved" title="Changed since it was saved">•</span>}
                     <span className="faint">{t.conn}</span>
                     {t.kind === 'table' && t.filters && <span className="pin-badge filtered" title={t.filters.map(filterText).join(' and ')}><Icon name="filter" size={10} />filtered</span>}
                     {t.pin && <span className="pin-badge" title={`Pinned to ${te?.label}`}><Dot env={te} />{te?.label}</span>}
@@ -390,7 +589,12 @@ export function App() {
               readOnly={profile.readOnly || tabEnv.production} canWrite={!profile.readOnly || tabEnv.production} envControl={envControl} onStatus={onStatus} />
           ) : (
             <div className="pane" key={tab.key}>
-              <QueryView conn={tab.conn} env={tabEnvId} envLabel={tabEnv.label} hasRead={hasRead(profile)} hasWrite={hasWrite(profile)} envControl={envControl} onStatus={onStatus} />
+              <QueryView conn={tab.conn} env={tabEnvId} envLabel={tabEnv.label} hasRead={hasRead(profile)} hasWrite={hasWrite(profile)} envControl={envControl} onStatus={onStatus}
+                initialSql={tab.sql} onRan={sql => onRan(sql, `${tab.conn}|${tabEnvId}`)}
+                schema={(c => (Array.isArray(c) ? c : null))(schemaCache[`${tab.conn}|${tabEnvId}`])} title={tab.name ?? `query-${tab.n}`} onSave={() => saveTab(tab.key)} onHistory={() => setHistoryFor({ conn: tab.conn, tab: tab.key })}
+                // An insert from the history is done once the editor's text changes.
+                inject={inject?.tab === tab.key ? inject : null}
+                onChange={sql => { patchQuery(tab.key, { sql }); if (inject?.tab === tab.key) setInject(null); }} />
             </div>
           )}
         </main>
@@ -412,6 +616,21 @@ export function App() {
 
       {sheet && <ConnectionSheet existing={sheet.conn} startEnv={sheet.env} environments={envs} onClose={() => setSheet(null)} onSaved={saved} onDeleted={deleted} />}
       {envSheet && <EnvironmentsSheet environments={envs} onClose={() => setEnvSheet(false)} onSaved={envsSaved} />}
+      {historyFor && (
+        <HistoryDialog connections={sqlConns.map(c => c.id)} conn={historyFor.conn} onClose={() => setHistoryFor(null)} onClear={clearHistory}
+          onOpen={e => { setHistoryFor(null); newQuery(e.conn, e.sql); }}
+          onInsert={historyFor.tab ? e => { const t = historyFor.tab!; setHistoryFor(null); setActive(t); setInject({ tab: t, sql: e.sql, seq: Date.now() }); } : undefined} />
+      )}
+      {naming && (
+        <PromptDialog title="Save query" label="Name, shown in the sidebar" action="Save" initial={(t => `query-${t?.kind === 'query' ? t.n : 1}.sql`)(tabs.find(t => t.key === naming))}
+          onCancel={() => setNaming(null)} onSubmit={name => { const key = naming; setNaming(null); saveTab(key, name); }} />
+      )}
+      {ask && (
+        <AskDialog title={ask.title} action={ask.action} onCancel={() => setAsk(null)}
+          onConfirm={() => { const a = ask; setAsk(null); a.run().catch((e: DbError) => flash(e.message, true)); }}>{ask.body}</AskDialog>
+      )}
+      {palette && <CommandPalette items={paletteItems()} onClose={() => setPalette(false)} />}
+      {toast && <div className={`toast${toast.bad ? ' bad' : ''}`} role="status">{toast.text}</div>}
     </div>
   );
 }

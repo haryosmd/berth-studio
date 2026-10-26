@@ -5,10 +5,13 @@
 //! (`default_transaction_read_only`), so the database itself refuses a stray write.
 //! Values travel as text (the simple query protocol), which is all the grid needs to show them.
 
+mod structure;
+
 use berth_core::{Endpoint, TlsMode};
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
+pub use structure::{build_ddl, Constraint, Index, SchemaColumn, StructureColumn, TableStructure, MAX_SCHEMA_COLUMNS};
 use tokio_postgres::types::ToSql;
 use tokio_postgres::{CancelToken, Client, NoTls, SimpleQueryMessage};
 

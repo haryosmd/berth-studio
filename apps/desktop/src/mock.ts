@@ -2,7 +2,7 @@
 // production build (see api.ts) and never talks to a database. It mirrors the Rust rules that
 // matter for the screens: production writes need the typed name, read-only profiles cannot write.
 import type {
-  BrowseRequest, CollectionInfo, Connection, Documents, Environment, Filter, Json, Page, ResultSet, RunResult, Table, TableInfo,
+  BrowseRequest, CollectionInfo, Connection, Documents, Environment, Filter, HistoryEntry, Json, Page, ResultSet, RunResult, SavedQuery, Table, TableInfo, TableStructure,
 } from './types';
 import { DEFAULT_ENVIRONMENTS } from './logic';
 
@@ -117,6 +117,16 @@ const collections: CollectionInfo[] = [
   { name: 'sessions', kind: 'collection', count: 40 },
 ];
 
+let saved: SavedQuery[] = [
+  { id: 'q1', name: 'active-users.sql', conn: 'acme-db', sql: "SELECT id, email, last_login\n  FROM users\n WHERE last_login > now() - interval '7 days';\n" },
+  { id: 'q2', name: 'revenue-by-plan.sql', conn: 'acme-db', sql: 'SELECT plan, count(*)\n  FROM users\n GROUP BY plan\n ORDER BY 2 DESC;\n' },
+];
+let history: HistoryEntry[] = [
+  { at: Date.now() - 86_400_000, conn: 'acme-db', env: 'dev', role: 'read', host: 'db-r.dev.acme.internal', sql: 'SELECT count(*) FROM orders;', elapsedMs: 21, rows: 1 },
+  { at: Date.now() - 3_600_000, conn: 'acme-db', env: 'staging', role: 'write', host: 'db-w.staging.acme.io', sql: "UPDATE users SET plan = 'pro' WHERE id = 42;", elapsedMs: 9, rows: 1 },
+  { at: Date.now() - 600_000, conn: 'acme-db', env: 'dev', role: 'read', host: 'db-r.dev.acme.internal', sql: 'SELECT * FROM userz;', elapsedMs: 3, rows: 0, error: 'relation "userz" does not exist' },
+];
+
 const wait = (ms: number) => new Promise(r => setTimeout(r, ms));
 const docs = (list: { [k: string]: Json }[], truncated = false): Documents => ({ documents: list, truncated, elapsedMs: 9 });
 const prod = (env: string) => !!envs.find(e => e.id === env)?.production;
@@ -161,6 +171,34 @@ export async function invoke<T>(cmd: string, args: Record<string, any> = {}): Pr
       };
       return (info[args.table] ?? { columns: USER_COLUMNS, foreignKeys: [], referencedBy: [] }) as T;
     }
+    case 'schema_columns':
+      return tables.flatMap(t => USER_COLUMNS.map(c => ({ schema: 'public', table: t.name, column: c.name, typeName: c.typeName }))) as T;
+    case 'table_structure': {
+      const columns = USER_COLUMNS.map(c => ({
+        name: c.name, typeName: c.typeName, nullable: !['id', 'email', 'full_name', 'plan', 'is_verified'].includes(c.name),
+        default: c.name === 'id' ? `nextval('${args.table}_id_seq'::regclass)` : c.name === 'is_verified' ? 'false' : null,
+        identity: null, generated: null, comment: c.name === 'metadata' ? 'Where the account came from' : null, primaryKey: c.primaryKey,
+      }));
+      const s: TableStructure = {
+        schema: 'public', name: args.table, kind: 'table', comment: null, columns, partitionKey: null, viewDefinition: null,
+        indexes: [
+          { name: `${args.table}_pkey`, method: 'btree', columns: 'id', definition: `CREATE UNIQUE INDEX ${args.table}_pkey ON public.${args.table} USING btree (id)`, primary: true, unique: true, constraint: `${args.table}_pkey`, sizeBytes: 49152 },
+          { name: `${args.table}_email_key`, method: 'btree', columns: 'email', definition: `CREATE UNIQUE INDEX ${args.table}_email_key ON public.${args.table} USING btree (email)`, primary: false, unique: true, constraint: `${args.table}_email_key`, sizeBytes: 81920 },
+          { name: `${args.table}_last_login_idx`, method: 'btree', columns: 'last_login DESC', definition: `CREATE INDEX ${args.table}_last_login_idx ON public.${args.table} USING btree (last_login DESC)`, primary: false, unique: false, constraint: null, sizeBytes: 40960 },
+        ],
+        constraints: [
+          { name: `${args.table}_pkey`, kind: 'primary key', definition: 'PRIMARY KEY (id)' },
+          { name: `${args.table}_email_key`, kind: 'unique', definition: 'UNIQUE (email)' },
+          { name: `${args.table}_org_id_fkey`, kind: 'foreign key', definition: 'FOREIGN KEY (org_id) REFERENCES orgs(id)' },
+        ],
+        ddl: '',
+      };
+      s.ddl = `-- table public.${args.table}, from the catalog. Grants, triggers and storage options are not included.\nCREATE TABLE "public"."${args.table}" (\n`
+        + [...columns.map(c => `    "${c.name}" ${c.typeName}${c.default ? ` DEFAULT ${c.default}` : ''}${c.nullable ? '' : ' NOT NULL'}`),
+          ...s.constraints.map(k => `    CONSTRAINT "${k.name}" ${k.definition}`)].join(',\n')
+        + `\n);\n${s.indexes[2].definition};\n`;
+      return s as T;
+    }
     case 'count_rows': {
       const r = args.request as BrowseRequest;
       return (r.filters.length || r.where ? { total: selectUsers(r).length, exact: true } : { total: 1300, exact: false }) as T;
@@ -177,9 +215,27 @@ export async function invoke<T>(cmd: string, args: Record<string, any> = {}): Pr
         reason: write ? 'The statement contains UPDATE.' : 'Read-only statement, routed to the read endpoint.',
         host: write ? 'db-w.dev.acme.internal' : 'db-r.dev.acme.internal', readOnly: !write, elapsedMs: 12,
       };
+      if (!/password/i.test(args.sql)) {
+        history.push({ at: Date.now(), conn: args.id, env: args.env, role: res.role, host: res.host, sql: args.sql, elapsedMs: res.elapsedMs, rows: res.results.reduce((n, s) => n + (s.columns.length ? s.rows.length : s.affected ?? 0), 0) });
+      }
       return res as T;
     }
     case 'cancel_query': return false as T;
+    case 'list_saved_queries': return structuredClone(saved) as T;
+    case 'save_query': {
+      const q = { ...(args.query as SavedQuery), name: (args.query as SavedQuery).name.trim() };
+      if (!q.name) throw { message: 'A saved query needs a name of 1 to 120 characters.' };
+      if (!q.id) q.id = `q${Date.now()}`;
+      saved = [...saved.filter(x => x.id !== q.id), q].sort((a, b) => a.name.toLowerCase().localeCompare(b.name.toLowerCase()));
+      return q as T;
+    }
+    case 'delete_saved_query': saved = saved.filter(x => x.id !== args.id); return undefined as T;
+    case 'list_history': {
+      const q = ((args.query as string | null) ?? '').trim().toLowerCase();
+      return history.filter(e => (!args.conn || e.conn === args.conn) && (!q || `${e.sql} ${e.conn} ${e.host}`.toLowerCase().includes(q)))
+        .reverse().slice(0, args.limit) as T;
+    }
+    case 'clear_history': history = history.filter(e => args.conn && e.conn !== args.conn); return undefined as T;
     case 'mongo_overview': return { server: { version: '8.0.34', topology: 'replica set rs0' }, databases: ['admin', 'events'] } as T;
     case 'list_collections': return (args.db === 'events' ? collections : []) as T;
     case 'find_documents': {
@@ -201,6 +257,15 @@ export async function invoke<T>(cmd: string, args: Record<string, any> = {}): Pr
     case 'write_document': {
       if (prod(args.env) && args.confirm !== args.id) throw confirmError(args.id);
       return { message: args.change.action === 'delete' ? 'Deleted the document.' : args.change.action === 'insert' ? 'Inserted a document.' : 'Saved the document.' } as T;
+    }
+    case 'save_export': {
+      // The browser preview downloads the file instead of showing a Save dialog.
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(new Blob([args.contents as string]));
+      a.download = args.suggestedName;
+      a.click();
+      URL.revokeObjectURL(a.href);
+      return `/Users/you/Downloads/${args.suggestedName}` as T;
     }
     case 'check_update': return { currentVersion: '0.1.0', version: '0.2.0', date: '2026-10-20T09:00:00Z',
       notes: "What's new\n- Filter bar in the table browser\n- Export results to CSV and JSON\n- Faster MongoDB collection counts" } as T;

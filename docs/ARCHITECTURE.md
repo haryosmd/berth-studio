@@ -124,7 +124,7 @@ Sessions are cached per connection, environment, role and read-only flag. Saving
 
 ## IPC surface
 
-The webview can call exactly the commands below. Each one is listed in `apps/desktop/src-tauri/build.rs` and allowed in `apps/desktop/src-tauri/capabilities/main.json`; anything else is rejected by Tauri. There is no shell, file system or HTTP plugin.
+The webview can call exactly the commands below. Each one is listed in `apps/desktop/src-tauri/build.rs` and allowed in `apps/desktop/src-tauri/capabilities/main.json`; anything else is rejected by Tauri. There is no shell, file system or HTTP plugin, and the webview never names a path.
 
 | Command | What it does |
 |---|---|
@@ -137,20 +137,28 @@ The webview can call exactly the commands below. Each one is listed in `apps/des
 | `list_tables` | Tables, views and materialised views the user can read |
 | `browse_table` | One page of a table: filter chips, an optional `WHERE` condition, a sort, limit and offset, all bound as parameters |
 | `describe_table` | A table's columns and its foreign keys, outgoing and incoming, from `pg_constraint` |
+| `table_structure` | A table's columns (nullability, defaults, identity, generated), indexes, constraints and comments, plus DDL built from them |
+| `schema_columns` | Every column of every readable table, at most 20,000, for SQL completion |
 | `count_rows` | How many rows a browse request matches: exact when it filters, the planner's estimate otherwise |
 | `run_query` | Routes, guards production, runs, and reports where the query ran |
 | `cancel_query` | Cancels a running query by its run id |
+| `list_saved_queries` | The saved queries in the workspace |
+| `save_query` | Saves a new query, or replaces one by id, for an existing connection |
+| `delete_saved_query` | Removes a saved query |
+| `list_history` | Recent runs from the local history, newest first, narrowed by connection and text |
+| `clear_history` | Forgets one connection's history, or all of it |
 | `mongo_overview` | MongoDB server version, topology and the databases the user can read |
 | `list_collections` | Collections, views and time-series collections, with estimated counts |
 | `find_documents` | Filter, sort, projection, skip and limit on one collection |
 | `aggregate` | Runs a pipeline; one that writes follows the production and read-only rules |
 | `list_indexes` | Index names, keys and uniqueness |
 | `write_document` | Inserts, replaces or deletes one document by `_id`, behind the same guards |
+| `save_export` | Shows the native Save dialog for a CSV or JSON export and writes the file where the user chose |
 | `check_update` | Asks the latest GitHub release whether a newer version exists |
 | `install_update` | Downloads, verifies and installs that version, streaming progress over a channel |
 | `restart_app` | Restarts into the installed update |
 
-The updater plugin is registered for its Rust API only. Its own commands are not in the capability file, so the webview cannot call them.
+The updater and dialog plugins are registered for their Rust APIs only. Their own commands are not in the capability file, so the webview cannot call them.
 
 The webview runs under a strict Content Security Policy, set in `tauri.conf.json`:
 - scripts only from the app bundle;

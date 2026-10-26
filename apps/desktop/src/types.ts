@@ -85,6 +85,44 @@ export interface ForeignKey {
   refColumns: string[];
 }
 
+/** One column of every table the session can read, for SQL autocomplete. */
+export interface SchemaColumn { schema: string; table: string; column: string; typeName: string }
+
+/** What `table_structure` reads from the catalog (crates/berth-postgres/src/structure.rs). */
+export interface StructureColumn {
+  name: string;
+  typeName: string;
+  nullable: boolean;
+  default: string | null;
+  identity: string | null;
+  generated: string | null;
+  comment: string | null;
+  primaryKey: boolean;
+}
+export interface TableIndex {
+  name: string;
+  method: string;
+  columns: string;
+  definition: string;
+  primary: boolean;
+  unique: boolean;
+  constraint: string | null;
+  sizeBytes: number;
+}
+export interface TableConstraint { name: string; kind: string; definition: string }
+export interface TableStructure {
+  schema: string;
+  name: string;
+  kind: string;
+  comment: string | null;
+  columns: StructureColumn[];
+  indexes: TableIndex[];
+  constraints: TableConstraint[];
+  partitionKey: string | null;
+  viewDefinition: string | null;
+  ddl: string;
+}
+
 export interface TableInfo {
   columns: Column[];
   foreignKeys: ForeignKey[];
@@ -151,6 +189,22 @@ export interface RunResult {
   host: string;
   readOnly: boolean;
   elapsedMs: number;
+}
+
+/** A query kept by name in the workspace, for one connection. An empty id asks the Rust side for a new one. */
+export interface SavedQuery { id: string; name: string; conn: string; sql: string }
+
+/** One run from the local query history (src-tauri/src/history.rs). `at` is Unix time in milliseconds. */
+export interface HistoryEntry {
+  at: number;
+  conn: string;
+  env: EnvId;
+  role: Role;
+  host: string;
+  sql: string;
+  elapsedMs: number;
+  rows: number;
+  error?: string;
 }
 
 export interface EndpointCheck {

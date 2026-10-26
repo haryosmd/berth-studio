@@ -1,16 +1,22 @@
 // One PostgreSQL table: a filtered, sorted page of rows. Filters are chips (column, operator,
 // value) that the Rust side binds as parameters, plus an optional raw WHERE condition; both run
-// as a single prepared statement on a read-only session.
+// as a single prepared statement on a read-only session. Structure, Indexes and DDL show what the
+// catalog says about the table.
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { api } from './api';
+import { ExportMenu } from './ExportMenu';
 import { Grid } from './Grid';
 import { Icon } from './Icons';
 import { Placeholder, Spinner } from './Status';
+import { StructureView, type StructureTab } from './StructureView';
 import { OPS, attachForeignKeys, filterText, findRows, fkFilters, nextSort, parseInValues, rowCountText, tableLabel } from './logic';
-import type { BrowseRequest, DbError, EnvId, Filter, FilterOp, Page, RowCount, Sort, TableInfo } from './types';
+import type { BrowseRequest, DbError, EnvId, Filter, FilterOp, Page, RowCount, Sort, TableInfo, TableStructure } from './types';
 import type { Status } from './App';
 
 const PAGE = 200;
+const VIEWS: { id: 'data' | StructureTab; label: string }[] = [
+  { id: 'data', label: 'Data' }, { id: 'structure', label: 'Structure' }, { id: 'indexes', label: 'Indexes' }, { id: 'ddl', label: 'DDL' },
+];
 
 interface Props {
   conn: string;
@@ -46,6 +52,8 @@ export function TableView({ conn, env, envLabel, schema, table, envControl, onSt
   const [count, setCount] = useState<RowCount | null>(null);
   const [find, setFind] = useState('');
   const countedFor = useRef('');
+  const [view, setView] = useState<'data' | StructureTab>('data');
+  const [structure, setStructure] = useState<TableStructure | DbError | null>(null);
 
   const request = useCallback((limit: number, at: number): BrowseRequest => ({ filters, where: where.trim() || null, sort, limit, offset: at }), [filters, where, sort]);
   const filtered = filters.length > 0 || where.trim().length > 0;
@@ -84,6 +92,15 @@ export function TableView({ conn, env, envLabel, schema, table, envControl, onSt
     return () => { live = false; };
   }, [conn, env, schema, table, nonce]);
   useEffect(() => setSelected(null), [page]);
+  // Read once the first time a catalog view opens, and again on Refresh.
+  const wantsStructure = view !== 'data';
+  useEffect(() => {
+    if (!wantsStructure) return;
+    let live = true;
+    setStructure(null);
+    api.tableStructure(conn, env, schema, table).then(s => live && setStructure(s)).catch((e: DbError) => live && setStructure(e));
+    return () => { live = false; };
+  }, [conn, env, schema, table, nonce, wantsStructure]);
 
   const columns = useMemo(() => (page ? attachForeignKeys(page.columns, info?.foreignKeys ?? []) : []), [page, info]);
   const follow = (row: number, col: number) => {
@@ -119,13 +136,24 @@ export function TableView({ conn, env, envLabel, schema, table, envControl, onSt
           <Icon name="chev" size={12} /><span>{schema}</span>
           <Icon name="chev" size={12} /><b>{table}</b>
         </span>
+        <div className="rtabs inline" role="tablist" aria-label="Table view">
+          {VIEWS.map(v => <button key={v.id} role="tab" aria-selected={view === v.id} onClick={() => setView(v.id)}>{v.label}</button>)}
+        </div>
         <span className="grow" />
         {envControl}
-        {loading && page && <Spinner label="Loading rows" />}
-        <button className="btn" disabled={offset === 0 || loading} onClick={() => setOffset(Math.max(0, offset - PAGE))}>Previous</button>
-        <button className="btn" disabled={atEnd || loading} onClick={() => setOffset(offset + PAGE)}>Next</button>
-        <button className="btn" disabled={loading} onClick={() => setNonce(n => n + 1)} title="Reload this page of rows"><Icon name="refresh" size={14} />Refresh</button>
+        {view === 'data' && <>
+          {loading && page && <Spinner label="Loading rows" />}
+          <button className="btn" disabled={offset === 0 || loading} onClick={() => setOffset(Math.max(0, offset - PAGE))}>Previous</button>
+          <button className="btn" disabled={atEnd || loading} onClick={() => setOffset(offset + PAGE)}>Next</button>
+          <ExportMenu name={table} columns={page?.columns.map(c => c.name) ?? []} rows={page?.rows ?? []} disabled={loading}
+            partial={!!page && (offset > 0 || page.rows.length === PAGE)} />
+        </>}
+        <button className="btn" disabled={loading} onClick={() => setNonce(n => n + 1)} title={view === 'data' ? 'Reload this page of rows' : 'Read the catalog again'}>
+          <Icon name="refresh" size={14} />Refresh
+        </button>
       </div>
+
+      {view !== 'data' ? <StructureView view={view} structure={structure} foreignKeys={info?.foreignKeys ?? []} /> : <>
 
       <form className="filters" onSubmit={e => { e.preventDefault(); if (draft) addFilter(); else applyWhere(); }} aria-label="Filters">
         <span className="faint" title="Filters run as bound parameters"><Icon name="filter" size={14} /></span>
@@ -216,6 +244,7 @@ export function TableView({ conn, env, envLabel, schema, table, envControl, onSt
           )}
         </div>
       )}
+      </>}
     </div>
   );
 }

@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "main",
-  "description": "The only window. Core window features plus Berth Studio's own commands; no shell, no file system, no HTTP. The updater plugin's own commands are not allowed: updates go through check_update and install_update. start-dragging is not in core:default and the title bar is an overlay, so without it the window cannot be moved.",
+  "description": "The only window. Core window features plus Berth Studio's own commands; no shell, no file system, no HTTP. The updater and dialog plugins' own commands are not allowed: updates go through check_update and install_update, and exports through save_export, which opens the Save dialog from Rust and writes only the path it returns. start-dragging is not in core:default and the title bar is an overlay, so without it the window cannot be moved.",
   "windows": [
     "main"
   ],
@@ -18,16 +18,24 @@
     "allow-browse-table",
     "allow-count-rows",
     "allow-describe-table",
+    "allow-table-structure",
+    "allow-schema-columns",
     "allow-preview-edits",
     "allow-commit-edits",
     "allow-run-query",
     "allow-cancel-query",
+    "allow-list-saved-queries",
+    "allow-save-query",
+    "allow-delete-saved-query",
+    "allow-list-history",
+    "allow-clear-history",
     "allow-mongo-overview",
     "allow-list-collections",
     "allow-find-documents",
     "allow-aggregate",
     "allow-list-indexes",
     "allow-write-document",
+    "allow-save-export",
     "allow-check-update",
     "allow-install-update",
     "allow-restart-app"

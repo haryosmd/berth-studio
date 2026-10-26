@@ -1,6 +1,6 @@
 // Pure helpers for the interface. No DOM and no IPC, so tests/ can run them with node --test.
 import type {
-  Column, Connection, EditPlan, Endpoint, Engine, EnvId, Environment, Filter, FilterOp, ForeignKey, Json, Profile, Role, RowCount, Sort, Table,
+  Column, Connection, EditPlan, Endpoint, Engine, EnvId, Environment, Filter, FilterOp, ForeignKey, Json, Profile, Role, RowCount, SchemaColumn, Sort, Table,
 } from './types';
 
 /** The environments a new workspace starts with; the Rust side owns the real list. */
@@ -381,4 +381,104 @@ export function lineCol(sql: string, position: number): { line: number; col: num
 export function formatBytes(n: number): string {
   if (n < 1024 * 1024) return `${Math.max(0, Math.round(n / 1024))} KB`;
   return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+/** The line a history row or tab shows for some SQL: the first one that is not blank or a `--` comment. */
+export function sqlSummary(sql: string): string {
+  const lines = sql.split('\n').map(l => l.trim()).filter(Boolean);
+  return (lines.find(l => !l.startsWith('--')) ?? lines[0] ?? '').replace(/\s+/g, ' ');
+}
+
+/** "Today", "Yesterday" or "Mon, Oct 20", for grouping history by local day. */
+export function historyDay(at: number, now = Date.now()): string {
+  const day = (t: number) => { const d = new Date(t); return new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime(); };
+  const diff = Math.round((day(now) - day(at)) / 86_400_000);
+  if (diff === 0) return 'Today';
+  if (diff === 1) return 'Yesterday';
+  return new Date(at).toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' });
+}
+
+/** 24-hour "09:02" in local time. */
+export function clockTime(at: number): string {
+  const d = new Date(at);
+  return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+}
+
+// A spreadsheet runs a cell that starts with one of these as a formula. Values come from the
+// server and are untrusted, so such a cell gets a leading apostrophe, unless it is just a number.
+const FORMULA_START = /^[=+\-@\t\r]/;
+const PLAIN_NUMBER = /^[+-]?(\d+(\.\d*)?|\.\d+)(e[+-]?\d+)?$/i;
+
+function csvCell(v: string | null): string {
+  if (v === null) return '';
+  const s = FORMULA_START.test(v) && !PLAIN_NUMBER.test(v) ? `'${v}` : v;
+  return /[",\r\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+}
+
+/** RFC 4180 CSV with a header row; NULL is an empty field. */
+export function toCsv(columns: string[], rows: (string | null)[][]): string {
+  return [columns, ...rows].map(r => r.map(csvCell).join(',')).join('\r\n') + '\r\n';
+}
+
+/** Column names made unique for JSON keys: a repeated name becomes name_2, name_3… */
+export function uniqueNames(columns: string[]): string[] {
+  const taken = new Set<string>();
+  return columns.map(name => {
+    let key = name;
+    for (let n = 2; taken.has(key); n++) key = `${name}_${n}`;
+    taken.add(key);
+    return key;
+  });
+}
+
+/** An array of objects, one per row. Values stay the text the server sent; NULL is null. */
+export function toJson(columns: string[], rows: (string | null)[][]): string {
+  const keys = uniqueNames(columns);
+  return JSON.stringify(rows.map(r => Object.fromEntries(keys.map((k, i) => [k, r[i] ?? null]))), null, 2) + '\n';
+}
+
+/** A file name for an export: the table or query name with anything unusual replaced. */
+export function exportName(base: string, ext: 'csv' | 'json'): string {
+  const clean = base.trim().replace(/\.(sql|csv|json)$/i, '').replace(/[^A-Za-z0-9._-]+/g, '-').replace(/^[-.]+|[-.]+$/g, '');
+  return `${clean || 'export'}.${ext}`;
+}
+
+/** A completion option as @codemirror/autocomplete takes it, built here without importing it. */
+export interface SqlCompletion { label: string; type: string; detail?: string }
+
+/** The schema cache in the shape lang-sql completes from: schema → table → columns. */
+export function toSqlNamespace(cols: SchemaColumn[]): Record<string, Record<string, SqlCompletion[]>> {
+  const out: Record<string, Record<string, SqlCompletion[]>> = {};
+  for (const c of cols) {
+    const tables = (out[c.schema] ??= {});
+    (tables[c.table] ??= []).push({ label: c.column, type: 'property', detail: c.typeName });
+  }
+  return out;
+}
+
+/**
+ * Scores `text` for the command palette: the query's characters must appear in order. Runs of
+ * consecutive characters, word starts and a prefix match score higher; `null` means no match.
+ */
+export function fuzzyScore(query: string, text: string): number | null {
+  const q = query.trim().toLowerCase().replace(/\s+/g, ' ');
+  if (!q) return 0;
+  const t = text.toLowerCase();
+  let score = 0, from = 0, prev = -2;
+  for (const ch of q) {
+    if (ch === ' ') continue;
+    const i = t.indexOf(ch, from);
+    if (i < 0) return null;
+    if (i === prev + 1) score += 3;
+    if (i === 0 || /[\s._\-/·|]/.test(t[i - 1])) score += 2;
+    score -= Math.min(i - from, 5) * 0.1;
+    prev = i;
+    from = i + 1;
+  }
+  if (t.startsWith(q)) score += 5;
+  else if (t.includes(q)) score += 3;
+  // "nc" for "New connection": the query spells the words' initials.
+  const initials = t.split(/[\s._\-/·|]+/).map(w => w[0] ?? '').join('');
+  if (initials.startsWith(q.replace(/ /g, ''))) score += 6;
+  return score;
 }
